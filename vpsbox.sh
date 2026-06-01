@@ -2592,7 +2592,7 @@ append_inbound() {
 local NEW_INBOUND=$2; local TARGET_PORT=$3; local CORE_NAME=$4; local LABEL=$5; local PROTOCOL_NAME=$6; local LINK=$7
 echo -e "${YELLOW}[系统] 正在写入独立节点片段，完成后约 30 秒生效 ${CORE_NAME}...${NC}"
 if persist_node_runtime "$CORE_NAME" "$TARGET_PORT" "${LABEL:-Node}" "${PROTOCOL_NAME:-Node}" "$LINK" "$NEW_INBOUND"; then
-    echo -e "${GREEN}  ✓ 节点片段写入成功，新节点约 30 秒后生效${NC}"
+    echo -e "${GREEN}  ✓ 节点片段写入成功，新节点约 30 秒后生效${NC} ${CORE_NAME}"
     return 0
 fi
 echo -e "${RED}[错误] 节点片段写入或延迟重启安排失败，已取消本次变更。${NC}"
@@ -2631,10 +2631,44 @@ read -r -p "> 请输入监听端口 (默认 50000, 0 取消): " PORT
 PORT="${PORT// /}"
 if [ "$PORT" == "0" ]; then return; fi; [ -z "$PORT" ] && PORT=50000
 if ! [[ "$PORT" =~ ^[0-9]+$ ]] || [ "$PORT" -lt 1 ] || [ "$PORT" -gt 65535 ]; then echo -e "${RED}[错误] 端口号必须是 1 到 65535 之间的纯数字！请重新输入。${NC}"; continue; fi
-if ss -tulpn | grep -qE ":${PORT}[[:space:]]|:${PORT}$"; then echo -e "${REinstall_ws_tls_node() {
+if ss -tulpn | grep -qE ":${PORT}[[:space:]]|:${PORT}$"; then echo -e "${RED}[错误] 端口 $PORT 已被占用！${NC}"; continue; fi
+break
+done
+echo -e "\n  ${GREEN}1.${NC} gateway.icloud.com (苹果官网)\n  ${GREEN}2.${NC} www.microsoft.com (微软官网)"
+read -r -p "> 选择伪装 SNI [输入 1-2 选择，或直接输入自定义域名, 默认 1, 0 取消]: " sni_choice
+sni_choice="${sni_choice// /}"
+if [ "$sni_choice" == "0" ]; then return; fi
+if [[ -z "$sni_choice" || "$sni_choice" == "1" ]]; then SNI_DOMAIN="gateway.icloud.com"; elif [[ "$sni_choice" == "2" ]]; then SNI_DOMAIN="www.microsoft.com"; else SNI_DOMAIN="$sni_choice"; fi
+if ! confirm_action "开始部署 Reality 节点"; then pause_for_enter; return; fi
+install_dependencies
+UUID=$(cat /proc/sys/kernel/random/uuid); SHORT_ID=$(openssl rand -hex 8)
+LINK_IP="$SERVER_IP"
+if [ "$SERVER_IPV4" == "未分配" ] && [ "$SERVER_IPV6" != "未分配" ]; then 
+    echo -e "${YELLOW}[提示] IPv4 未分配，自动使用 IPv6: [${SERVER_IPV6}]${NC}"
+    LINK_IP="[${SERVER_IPV6}]"
+fi
+CORE_NAME="Sing-box"
+if ! command -v sing-box &> /dev/null; then echo -e "${YELLOW}   首次部署需下载 Sing-box 核心，请耐心等待...${NC}"; _run_remote_bash https://sing-box.app/install.sh > /dev/null 2>&1; hash -r; command -v sing-box &>/dev/null || { echo -e "\n${RED}[错误] Sing-box 核心下载失败，请检查网络连接。${NC}"; pause_for_enter; return; }; fi
+SB_BIN=$(command -v sing-box || echo "/usr/local/bin/sing-box"); KEYS=$("$SB_BIN" generate reality-keypair)
+PRI=$(echo "$KEYS" | awk -F'[: ]+' '/Private/{print $NF}'); PUB=$(echo "$KEYS" | awk -F'[: ]+' '/Public/{print $NF}')
+NEW_INBOUND='{"type":"vless","listen":"0.0.0.0","listen_port":'$PORT',"users":[{"uuid":"'$UUID'","flow":"xtls-rprx-vision"}],"tls":{"enabled":true,"server_name":"'$SNI_DOMAIN'","reality":{"enabled":true,"handshake":{"server":"'$SNI_DOMAIN'","server_port":443},"private_key":"'$PRI'","short_id":["'$SHORT_ID'"]}}}'
+
+LINK="vless://${UUID}@${LINK_IP}:${PORT}?encryption=none&security=reality&sni=${SNI_DOMAIN}&fp=chrome&pbk=${PUB}&sid=${SHORT_ID}&flow=xtls-rprx-vision#R"
+
+if append_inbound "$(_config_file_for_core "$CORE_NAME")" "$NEW_INBOUND" "$PORT" "$CORE_NAME" "Reality" "vless-reality" "$LINK"; then
+    output_node_result "$LINK" "Reality" "$PORT" "$CORE_NAME" "vless-reality"
+    echo -e "\n${GREEN}>>> 已通过独立端口配置文件完成接入，新节点约 30 秒后生效。旧连接不会因新增节点在部署中途被重启。${NC}"
+else
+    echo -e "\n${RED}[错误] 配置校验失败 — 生成的 JSON 不符合要求，未修改任何文件。${NC}"
+fi
+pause_for_enter
+}
+
+install_anytls_node() {
 clear_screen; print_divider
-print_center "[ 部署 VLESS-WS-TLS 节点 ]" "$CYAN"
-echo -e "${YELLOW}>>> 小白科普：WS+TLS 是非常经典的节点协议。最大的优势是可以搭配 Cloudflare 等 CDN 使用。如果您服务器的 IP 已经被墙，用这个协议配合 CDN 就能起死回生。${NC}\n"
+print_center "[ 部署 AnyTLS 节点 ]" "$CYAN"
+_ensure_ip
+echo -e "${YELLOW}>>> 小白科普：AnyTLS 是 sing-box 专属协议。使用自有域名 + Let's Encrypt 真证书，密码认证。${NC}\n"
 
 while true; do
 read -r -p "> 请输入域名 (输入 0 取消): " DOMAIN
@@ -2644,55 +2678,19 @@ if [ -z "$DOMAIN" ]; then continue; fi
 DOMAIN_IP=$(_domain_resolution_summary "$DOMAIN")
 break
 done
-while true; do
-read -r -p "> 监听端口 (默认 443, 0 取消): " WS_PORT
-WS_PORT="${WS_PORT// /}"
-if [ "$WS_PORT" == "0" ]; then return; fi; [ -z "$WS_PORT" ] && WS_PORT=443
-if ! [[ "$WS_PORT" =~ ^[0-9]+$ ]] || [ "$WS_PORT" -lt 1 ] || [ "$WS_PORT" -gt 65535 ]; then continue; fi
-if ss -tulpn | grep -qE ":${WS_PORT}[[:space:]]|:${WS_PORT}$"; then echo -e "${RED}端口 $WS_PORT 已被占用！${NC}"; continue; fi
-break
-done
-echo -e "\n${YELLOW}>>> 如何获取 Cloudflare API Token？${NC}"
-echo -e "  ${GREEN}1.${NC} 登录 Cloudflare 控制台: https://dash.cloudflare.com"
-echo -e "  ${GREEN}2.${NC} 点击右上角头像 →「我的个人资料」→「API 令牌」"
-echo -e "  ${GREEN}3.${NC} 点击「创建令牌」→ 选择「编辑区域 DNS」模板"
-echo -e "  ${GREEN}4.${NC} 权限选「区域 - DNS - 编辑」，区域选你的域名，创建后复制 Token"
-echo ""
-while true; do
-read -r -s -p "> 请输入您的 Cloudflare API Token (输入 0 取消): " CF_Token
-echo ""
-CF_Token="${CF_Token// /}"
-if [ "$CF_Token" == "0" ]; then return; fi
-if [ -z "$CF_Token" ]; then continue; fi
-export CF_Token="$CF_Token"; break
-done
-cert_mode=1
-if ! confirm_action "开始部署 WS+TLS 节点并申请证书"; then pause_for_enter; return; fi
-acquire_cert "$DOMAIN" "$cert_mode" "$CF_Token" "" || { pause_for_enter; return; }
-UUID=$(cat /proc/sys/kernel/random/uuid); WSPATH="/$(openssl rand -hex 4)"
-CORE_NAME="Sing-box"
-if ! command -v sing-box &> /dev/null; then echo -e "${YELLOW}   首次部署需下载 Sing-box 核心，请耐心等待...${NC}"; _run_remote_bash https://sing-box.app/install.sh > /dev/null 2>&1; hash -r; command -v sing-box &>/dev/null || { echo -e "\n${RED}[错误] Sing-box 核心下载失败，请检查网络连接。${NC}"; pause_for_enter; return; }; fi
-NEW_INBOUND='{"type":"vless","listen":"0.0.0.0","listen_port":'$WS_PORT',"users":[{"uuid":"'$UUID'"}],"tls":{"enabled":true,"server_name":"'$DOMAIN'","certificate_path":"'$CERT_DIR'/fullchain.pem","key_path":"'$CERT_DIR'/privkey.pem"},"transport":{"type":"ws","path":"'$WSPATH'"}}'
 
-LINK="vless://${UUID}@${DOMAIN}:${WS_PORT}?encryption=none&security=tls&sni=${DOMAIN}&alpn=h2%2Chttp%2F1.1&type=ws&host=${DOMAIN}&path=${WSPATH}#WS"
-
-if append_inbound "$(_config_file_for_core "$CORE_NAME")" "$NEW_INBOUND" "$WS_PORT" "$CORE_NAME" "WS-TLS" "vless-ws-tls" "$LINK"; then
-    output_node_result "$LINK" "WS-TLS" "$WS_PORT" "$CORE_NAME" "vless-ws-tls"
-    echo -e "\n${GREEN}>>> 已通过独立端口配置文件完成接入，新节点约 30 秒后生效。${NC}"
+echo -e "\n${CYAN}>>> 证书申请模式选择${NC}"
+echo -e "  ${GREEN}1.${NC} 【API模式】使用 Cloudflare API 申请\n  ${GREEN}2.${NC} 【独立模式】使用常规 80 端口申请"
+while true; do
+read -r -p "> 选择模式 [1-2, 默认 2, 0 取消]: " cert_mode
+cert_mode="${cert_mode// /}"
+if [ "$cert_mode" == "0" ]; then return; fi; [ -z "$cert_mode" ] && cert_mode=2
+if [[ "$cert_mode" != "1" && "$cert_mode" != "2" ]]; then continue; fi
+if [ "$cert_mode" == "1" ]; then
+    read -r -s -p "> CF API Token: " CF_Token; echo ""; [ -z "$CF_Token" ] && continue
+    export CF_Token="$CF_Token"; break
 else
-    echo -e "\n${RED}[错误] 配置校验失败。${NC}"
-fi
-
-echo ""
-echo -e "${YELLOW}>>> 小白提示：必须开启 Cloudflare 小黄云（CDN 代理）${NC}"
-echo -e "  WS-TLS 搭配 CDN 优选才能发挥最佳效果。开启后："
-echo -e "     ✅ 隐藏真实服务器 IP，防 DDoS 攻击"
-echo -e "     ✅ 被墙的 IP 能「起死回生」"
-echo -e "     🔧 操作：CF 控制台 → DNS 记录 → 编辑 → 代理状态打开（橙色云朵）"
-echo -e "  ⚠️  记得在 CF 的 SSL/TLS 设置中开启「完全（严格）」模式"
-echo ""
-pause_for_enter
-}n
+    if [ -n "$DOMAIN_IP" ] && ! _domain_points_to_server "$DOMAIN"; then
         echo -e "\n${YELLOW}[警告] 域名解析结果 ($DOMAIN_IP) 与本机 IP 不符！${NC}"
         echo -e "${YELLOW}  ⚠️  可能开了 CF 小黄云，请关闭代理或换 API 模式。${NC}"
         read -r -p "> 强行继续？(y/n): " force_continue
