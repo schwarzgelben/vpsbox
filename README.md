@@ -202,13 +202,13 @@ VPS Box 的价值在于，它试图在“简单上手”和“长期可用”之
 ### 在线运行
 
 ```bash
-bash <(curl -sL https://raw.githubusercontent.com/vmenzo/VPSBox/main/vpsbox.sh)
+bash <(curl -sL https://raw.githubusercontent.com/schwarzgelben/vpsbox/main/vpsbox.sh)
 ```
 
 兼容传统写法：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/vmenzo/VPSBox/main/vpsbox.sh | bash
+curl -fsSL https://raw.githubusercontent.com/schwarzgelben/vpsbox/main/vpsbox.sh | bash
 ```
 
 首次运行后会自动注册快捷命令：

@@ -1,8 +1,8 @@
-﻿#!/bin/bash
+#!/bin/bash
 # =====================================================================
 # 项目名称: VPS Box (轻量级节点管理与网络优化引擎)
 # 版本: v1.8.9 — 增加快捷中转、HY2 端口跳跃、Shadowsocks 节点
-# 推荐运行方式: bash <(curl -sL https://raw.githubusercontent.com/vmenzo/VPSBox/main/vpsbox.sh)
+# 推荐运行方式: bash <(curl -sL https://raw.githubusercontent.com/schwarzgelben/vpsbox/main/vpsbox.sh)
 # =====================================================================
 VPSBOX_VERSION="v1.8.9"
 
@@ -24,7 +24,7 @@ echo -e "\n${GREEN}[VPSBox v${VPSBOX_VERSION#v}]${NC} 正在初始化..."
 BACKUP_DIR="/etc/vpsbox_backups"
 CUSTOM_CONF="/etc/sysctl.d/99-vpsbox-tcp.conf"
 SHORTCUT_PATH="/usr/local/bin/vpsbox"
-SCRIPT_URL="https://raw.githubusercontent.com/vmenzo/VPSBox/main/vpsbox.sh"
+SCRIPT_URL="https://raw.githubusercontent.com/schwarzgelben/vpsbox/main/vpsbox.sh"
 NODE_RECORD_FILE="/etc/vpsbox_nodes.txt"
 INSTALL_LOG="/tmp/vpsbox_install.log"
 SING_BOX_CONFIG_FILE="/etc/sing-box/config.json"
@@ -2589,7 +2589,7 @@ pause_for_enter
 }
 
 append_inbound() {
-local NEW_INBOUND=$2; local TARGET_PORT=$3; local CORE_NAME=$4; local LABEL=$5; local PROTOCOL_NAME=$6; local LINK=$7
+local NEW_INBOUND=$1; local TARGET_PORT=$2; local CORE_NAME=$3; local LABEL=$4; local PROTOCOL_NAME=$5; local LINK=$6
 echo -e "${YELLOW}[系统] 正在写入独立节点片段，完成后约 30 秒生效 ${CORE_NAME}...${NC}"
 if persist_node_runtime "$CORE_NAME" "$TARGET_PORT" "${LABEL:-Node}" "${PROTOCOL_NAME:-Node}" "$LINK" "$NEW_INBOUND"; then
     echo -e "${GREEN}  ✓ 节点片段写入成功，新节点约 30 秒后生效${NC} ${CORE_NAME}"
@@ -2655,7 +2655,7 @@ NEW_INBOUND='{"type":"vless","listen":"0.0.0.0","listen_port":'$PORT',"users":[{
 
 LINK="vless://${UUID}@${LINK_IP}:${PORT}?encryption=none&security=reality&sni=${SNI_DOMAIN}&fp=chrome&pbk=${PUB}&sid=${SHORT_ID}&flow=xtls-rprx-vision#R"
 
-if append_inbound "$(_config_file_for_core "$CORE_NAME")" "$NEW_INBOUND" "$PORT" "$CORE_NAME" "Reality" "vless-reality" "$LINK"; then
+if append_inbound "$NEW_INBOUND" "$PORT" "$CORE_NAME" "Reality" "vless-reality" "$LINK"; then
     output_node_result "$LINK" "Reality" "$PORT" "$CORE_NAME" "vless-reality"
     echo -e "\n${GREEN}>>> 已通过独立端口配置文件完成接入，新节点约 30 秒后生效。旧连接不会因新增节点在部署中途被重启。${NC}"
 else
@@ -2722,7 +2722,7 @@ PASSWORD=$(openssl rand -base64 12 | tr -d '+/=' | head -c 16)
 NEW_INBOUND='{"type":"anytls","listen":"0.0.0.0","listen_port":'$PORT',"users":[{"password":"'$PASSWORD'"}],"tls":{"enabled":true,"server_name":"'$DOMAIN'","certificate_path":"'$CERT_DIR'/fullchain.pem","key_path":"'$CERT_DIR'/privkey.pem"}}'
 LINK="anytls://${PASSWORD}@${DOMAIN}:${PORT}?peer=${DOMAIN}#AnyTLS-${PORT}"
 
-if append_inbound "$(_config_file_for_core "$CORE_NAME")" "$NEW_INBOUND" "$PORT" "$CORE_NAME" "AnyTLS" "anytls" "$LINK"; then
+if append_inbound "$NEW_INBOUND" "$PORT" "$CORE_NAME" "AnyTLS" "anytls" "$LINK"; then
     output_node_result "$LINK" "AnyTLS" "$PORT" "$CORE_NAME" "anytls"
     echo -e "\n${GREEN}>>> 已通过独立端口配置文件完成接入，新节点约 30 秒后生效。${NC}"
 else
@@ -2876,7 +2876,7 @@ NEW_INBOUND='{"type":"vless","listen":"0.0.0.0","listen_port":'$WS_PORT',"users"
 
 LINK="vless://${UUID}@${DOMAIN}:${WS_PORT}?encryption=none&security=tls&sni=${DOMAIN}&alpn=h2%2Chttp%2F1.1&type=ws&host=${DOMAIN}&path=${WSPATH}#WS"
 
-if append_inbound "$(_config_file_for_core "$CORE_NAME")" "$NEW_INBOUND" "$WS_PORT" "$CORE_NAME" "WS-TLS" "vless-ws-tls" "$LINK"; then
+if append_inbound "$NEW_INBOUND" "$WS_PORT" "$CORE_NAME" "WS-TLS" "vless-ws-tls" "$LINK"; then
     output_node_result "$LINK" "WS-TLS" "$WS_PORT" "$CORE_NAME" "vless-ws-tls"
     echo -e "\n${GREEN}>>> 已通过独立端口配置文件完成接入，新节点约 30 秒后生效。${NC}"
 else
@@ -2939,7 +2939,7 @@ NEW_INBOUND='{"type":"shadowsocks","listen":"0.0.0.0","listen_port":'$SS_PORT',"
 SS_USERINFO=$(printf '%s:%s' "$SS_METHOD" "$SS_PASS" | base64 -w0 2>/dev/null || printf '%s:%s' "$SS_METHOD" "$SS_PASS" | base64 | tr -d '\n')
 LINK="ss://${SS_USERINFO}@${LINK_IP}:${SS_PORT}#SS-${SS_PORT}"
 
-if append_inbound "$(_config_file_for_core "$CORE_NAME")" "$NEW_INBOUND" "$SS_PORT" "$CORE_NAME" "Shadowsocks" "shadowsocks" "$LINK"; then
+if append_inbound "$NEW_INBOUND" "$SS_PORT" "$CORE_NAME" "Shadowsocks" "shadowsocks" "$LINK"; then
     output_node_result "$LINK" "Shadowsocks" "$SS_PORT" "$CORE_NAME" "shadowsocks"
     echo -e "\n${GREEN}>>> Shadowsocks 节点已生成，新节点约 30 秒后生效。${NC}"
     echo -e "${YELLOW}>>> 如使用云厂商安全组，请同时放行 ${SS_PORT}/tcp 与 ${SS_PORT}/udp。${NC}"
@@ -3057,7 +3057,7 @@ NEW_INBOUND='{"type":"hysteria2","listen":"0.0.0.0","listen_port":'$HY2_PORT',"u
 
 LINK="hysteria2://${HY2_PASS}@${DOMAIN}:${HY2_PORT}/?sni=${DOMAIN}&alpn=h3&insecure=0#H2"
 
-if append_inbound "$(_config_file_for_core "$CORE_NAME")" "$NEW_INBOUND" "$HY2_PORT" "$CORE_NAME" "Hys2" "hysteria2" "$LINK"; then
+if append_inbound "$NEW_INBOUND" "$HY2_PORT" "$CORE_NAME" "Hys2" "hysteria2" "$LINK"; then
     if [ "$HY2_HOP_ENABLED" -eq 1 ]; then
         _setup_hy2_port_hopping "$HY2_PORT" "$HY2_HOP_RANGE"
     fi
@@ -3158,34 +3158,86 @@ _forward_unit_file() {
   echo "${PORT_FORWARD_SERVICE_DIR}/$(_forward_unit_name "$1" "$2")"
 }
 
-_write_socat_forward() {
-  local listen_port="$1" proto="$2" target_host="$3" target_port="$4" unit_file unit_name exec_cmd
-  unit_name=$(_forward_unit_name "$listen_port" "$proto")
-  unit_file=$(_forward_unit_file "$listen_port" "$proto")
-  mkdir -p "$PORT_FORWARD_STATE_DIR"
-  if [ "$proto" = "tcp" ]; then
-    exec_cmd="/usr/bin/socat TCP-LISTEN:${listen_port},fork,reuseaddr TCP:${target_host}:${target_port}"
-  else
-    exec_cmd="/usr/bin/socat UDP-LISTEN:${listen_port},fork,reuseaddr UDP:${target_host}:${target_port}"
-  fi
-  cat > "$unit_file" <<EOFUNIT
+_ensure_realm_installed() {
+  if [ -x /opt/realm/realm ]; then return 0; fi
+  echo -e "${YELLOW}   首次使用需下载 Realm 核心，请耐心等待...${NC}"
+  mkdir -p /opt/realm
+  local tmp_tgz="/tmp/realm.tar.gz"
+  if wget -O "$tmp_tgz" https://github.com/zhboner/realm/releases/download/v2.9.4/realm-x86_64-unknown-linux-gnu.tar.gz >/dev/null 2>&1 || curl -L -o "$tmp_tgz" https://github.com/zhboner/realm/releases/download/v2.9.4/realm-x86_64-unknown-linux-gnu.tar.gz >/dev/null 2>&1; then
+    tar -C /opt/realm -xvf "$tmp_tgz" >/dev/null 2>&1
+    chmod +x /opt/realm/realm
+    rm -f "$tmp_tgz"
+    if [ -x /opt/realm/realm ]; then
+      [ -f /opt/realm/config.toml ] || touch /opt/realm/config.toml
+      cat > /etc/systemd/system/realm.service <<EOF
 [Unit]
-Description=VPSBox socat forward ${proto} ${listen_port} to ${target_host}:${target_port}
+Description=realm
 After=network-online.target
-Wants=network-online.target
+Wants=network-online.target systemd-networkd-wait-online.service
 
 [Service]
 Type=simple
-ExecStart=${exec_cmd}
-Restart=always
-RestartSec=3
-LimitNOFILE=65535
+User=root
+Restart=on-failure
+RestartSec=5s
+DynamicUser=true
+WorkingDirectory=/opt/realm
+ExecStart=/opt/realm/realm -c /opt/realm/config.toml
 
 [Install]
 WantedBy=multi-user.target
-EOFUNIT
-  _svc_daemon_reload >/dev/null 2>&1 || true
-  systemctl enable --now "$unit_name" >/dev/null 2>&1
+EOF
+      systemctl daemon-reload >/dev/null 2>&1
+      systemctl enable realm >/dev/null 2>&1
+      return 0
+    fi
+  fi
+  echo -e "${RED}[错误] Realm 核心下载或安装失败，请检查网络连接。${NC}"
+  return 1
+}
+
+_rebuild_realm_config() {
+  local config_file="/opt/realm/config.toml"
+  mkdir -p /opt/realm
+  printf "" > "$config_file"
+  shopt -s nullglob
+  local files=("${PORT_FORWARD_STATE_DIR}"/*.conf)
+  shopt -u nullglob
+  local processed_ports=""
+  for f in "${files[@]}"; do
+    unset LISTEN_PORT PROTO TARGET_HOST TARGET_PORT MODE TARGET_IP UNIT
+    . "$f" 2>/dev/null || true
+    if [ "${MODE:-}" = "realm" ]; then
+      if [[ ! " ${processed_ports} " =~ " ${LISTEN_PORT} " ]]; then
+        cat >> "$config_file" <<EOF
+
+[[endpoints]]
+listen = "[::]:${LISTEN_PORT}"
+remote = "${TARGET_HOST}:${TARGET_PORT}"
+EOF
+        processed_ports="${processed_ports} ${LISTEN_PORT}"
+      fi
+    fi
+  done
+}
+
+_apply_realm_forward() {
+  local listen_port="$1" proto="$2" target_host="$3" target_port="$4"
+  _ensure_realm_installed || return 1
+  
+  local state_file; state_file=$(_forward_state_file "$listen_port" "$proto")
+  _write_forward_state "$listen_port" "$proto" "$target_host" "$target_port" "realm" "" "realm.service"
+  
+  _rebuild_realm_config
+  
+  if systemctl restart realm >/dev/null 2>&1; then
+    return 0
+  else
+    rm -f "$state_file"
+    _rebuild_realm_config
+    systemctl restart realm >/dev/null 2>&1 || true
+    return 1
+  fi
 }
 
 _write_forward_state() {
@@ -3210,9 +3262,7 @@ _apply_port_forward() {
       return 0
     fi
   fi
-  command -v socat >/dev/null 2>&1 || return 1
-  if _write_socat_forward "$listen_port" "$proto" "$target_host" "$target_port"; then
-    _write_forward_state "$listen_port" "$proto" "$target_host" "$target_port" "socat" "" "$(_forward_unit_name "$listen_port" "$proto")"
+  if _apply_realm_forward "$listen_port" "$proto" "$target_host" "$target_port"; then
     return 0
   fi
   return 1
@@ -3238,7 +3288,7 @@ _list_port_forwards() {
 add_port_forward() {
 clear_screen; print_divider
 print_center "[ 添加端口转发 / 快捷中转 ]" "$CYAN"
-echo -e "${YELLOW}>>> 优先使用 iptables 内核转发（性能更好），无法解析/应用时自动回退 socat + systemd。${NC}"
+echo -e "${YELLOW}>>> 优先使用 iptables 内核转发（性能更好），无法解析/应用时自动回退 realm + systemd。${NC}"
 echo -e "${YELLOW}>>> 请确认目标地址可信，避免把服务器变成开放转发入口。${NC}\n"
 
 while true; do
@@ -3294,7 +3344,7 @@ for p in $protos; do
     echo -e "${RED}  ✗ ${p} 转发启动失败${NC}"
   fi
 done
-[ "$ok" -eq 1 ] && echo -e "\n${GREEN}[成功] 快捷中转已添加。iptables 模式性能更好；socat 模式更兼容。${NC}" || echo -e "\n${YELLOW}[警告] 部分转发启动失败，请检查规则。${NC}"
+[ "$ok" -eq 1 ] && echo -e "\n${GREEN}[成功] 快捷中转已添加。iptables 模式性能更好；realm 模式更兼容。${NC}" || echo -e "\n${YELLOW}[警告] 部分转发启动失败，请检查规则。${NC}"
 pause_for_enter
 }
 
@@ -3321,11 +3371,16 @@ unset LISTEN_PORT PROTO TARGET_HOST TARGET_PORT MODE TARGET_IP UNIT
 if ! confirm_action "删除转发 ${PROTO} :${LISTEN_PORT} -> ${TARGET_HOST}:${TARGET_PORT}" "n"; then pause_for_enter; return; fi
 if [ "${MODE:-}" = "iptables" ]; then
   _remove_iptables_forward "$LISTEN_PORT" "$PROTO" "$TARGET_IP" "$TARGET_PORT"
+  rm -f "$f"
+elif [ "${MODE:-}" = "realm" ]; then
+  rm -f "$f"
+  _rebuild_realm_config
+  systemctl restart realm >/dev/null 2>&1 || true
 else
   [ -n "${UNIT:-}" ] && systemctl disable --now "$UNIT" >/dev/null 2>&1 || true
   [ -n "${LISTEN_PORT:-}" ] && [ -n "${PROTO:-}" ] && rm -f "$(_forward_unit_file "$LISTEN_PORT" "$PROTO")"
+  rm -f "$f"
 fi
-rm -f "$f"
 _svc_daemon_reload >/dev/null 2>&1 || true
 echo -e "\n${GREEN}[成功] 转发规则已删除。${NC}"
 pause_for_enter
@@ -3773,7 +3828,7 @@ clear_screen; print_divider
 print_center "[ VPSBox 脚本管理 ]" "$CYAN"
 local local_ver remote_ver
 local_ver="${VPSBOX_VERSION:-未知}"
-remote_ver=$(curl -sL --connect-timeout 2 --max-time 3 https://raw.githubusercontent.com/vmenzo/VPSBox/main/vpsbox.sh 2>/dev/null | grep -oP '^VPSBOX_VERSION="\K[^"]+' | head -1)
+remote_ver=$(curl -sL --connect-timeout 2 --max-time 3 https://raw.githubusercontent.com/schwarzgelben/vpsbox/main/vpsbox.sh 2>/dev/null | grep -oP '^VPSBOX_VERSION="\K[^"]+' | head -1)
 echo -e "  ${CYAN}本地版本:${NC} ${GREEN}${local_ver}${NC}"
 if [ -n "$remote_ver" ]; then
   local _local_cmp _remote_cmp _remote_newer=0 _local_newer=0 _i _r _l
@@ -3806,7 +3861,7 @@ case $ms_opt in
 1)
 if ! confirm_action "从 GitHub 拉取最新版覆盖当前脚本"; then continue; fi
 echo -e "\n${CYAN}>>> 正在下载...${NC}"
-curl -sL --connect-timeout 5 --max-time 30 "https://raw.githubusercontent.com/vmenzo/VPSBox/main/vpsbox.sh" -o /tmp/vpsbox_update.sh
+curl -sL --connect-timeout 5 --max-time 30 "https://raw.githubusercontent.com/schwarzgelben/vpsbox/main/vpsbox.sh" -o /tmp/vpsbox_update.sh
 if [ -f /tmp/vpsbox_update.sh ] && grep -q "VPSBox" /tmp/vpsbox_update.sh; then
 mv /tmp/vpsbox_update.sh "$SHORTCUT_PATH"; chmod +x "$SHORTCUT_PATH"
 echo -e "\n${GREEN}[成功] 已更新！${NC}"
@@ -3818,7 +3873,18 @@ pause_for_enter ;;
 2)
 echo -e "\n${RED}[警告] 将删除快捷命令、本地备份、节点记录及所有缓存。${NC}"
 if ! confirm_action "彻底卸载 VPSBox" "n"; then continue; fi
-rm -f /usr/local/bin/vpsbox; rm -rf /etc/vpsbox_backups; rm -f "$NODE_RECORD_FILE"; rm -f "$INSTALL_LOG"
+if command -v systemctl &>/dev/null; then
+  systemctl disable --now sing-box 2>/dev/null || true
+  systemctl disable --now realm 2>/dev/null || true
+  rm -f /etc/systemd/system/realm.service
+  systemctl daemon-reload >/dev/null 2>&1 || true
+fi
+rm -f /usr/local/bin/vpsbox; rm -rf "$BACKUP_DIR"; rm -f "$NODE_RECORD_FILE"; rm -f "$INSTALL_LOG"
+rm -rf "$SING_BOX_RUNTIME_DIR"
+rm -rf "$NODE_RUNTIME_STATE_DIR"
+rm -rf "$PORT_FORWARD_STATE_DIR"
+rm -f "$SING_BOX_SERVICE_FILE"
+rm -rf /opt/realm
 echo -e "\n${GREEN}[成功] VPSBox 已彻底卸载！${NC}"; exit 0 ;;
 0) return ;;
 *) echo -e "\n${RED}输入无效！${NC}"; sleep 1 ;;
