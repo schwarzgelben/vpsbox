@@ -1,4 +1,4 @@
-﻿#!/bin/bash
+#!/bin/bash
 # =====================================================================
 # 项目名称: VPS Box (轻量级节点管理与网络优化引擎)
 # 版本: v1.8.9 — 增加快捷中转、HY2 端口跳跃、Shadowsocks 节点
@@ -27,12 +27,17 @@ SHORTCUT_PATH="/usr/local/bin/vpsbox"
 SCRIPT_URL="https://raw.githubusercontent.com/vmenzo/VPSBox/main/vpsbox.sh"
 NODE_RECORD_FILE="/etc/vpsbox_nodes.txt"
 INSTALL_LOG="/tmp/vpsbox_install.log"
-SING_BOX_CONFIG_FILE="/etc/sing-box/config.json"
-SING_BOX_NODES_DIR="/etc/sing-box/nodes.d"
-SING_BOX_RUNTIME_DIR="/etc/sing-box"
+XRAY_CONFIG_FILE="/usr/local/etc/xray/config.json"
+SINGBOX_CONFIG_FILE="/etc/sing-box/config.json"
+XRAY_NODES_DIR="/usr/local/etc/xray/nodes.d"
+SINGBOX_NODES_DIR="/etc/sing-box/nodes.d"
+XRAY_RUNTIME_DIR="/usr/local/etc/xray"
+SINGBOX_RUNTIME_DIR="/etc/sing-box"
 NODE_RUNTIME_STATE_DIR="/etc/vpsbox_node_runtime"
-SING_BOX_META_FILE="${NODE_RUNTIME_STATE_DIR}/sing_box_nodes.json"
-SING_BOX_SERVICE_FILE="/etc/systemd/system/sing-box.service"
+XRAY_META_FILE="${NODE_RUNTIME_STATE_DIR}/xray_nodes.json"
+SINGBOX_META_FILE="${NODE_RUNTIME_STATE_DIR}/singbox_nodes.json"
+XRAY_SERVICE_FILE="/etc/systemd/system/xray.service"
+SINGBOX_SERVICE_FILE="/etc/systemd/system/sing-box.service"
 PORT_FORWARD_STATE_DIR="/etc/vpsbox_port_forward"
 PORT_FORWARD_SERVICE_DIR="/etc/systemd/system"
 
@@ -83,14 +88,16 @@ _check_startup_update
 if [ -f /etc/os-release ]; then
 # shellcheck disable=SC1091
 . /etc/os-release
-if [[ "$ID" == "debian" && "$VERSION_ID" == "13" ]]; then
+# 允许所有主流 Linux 发行版运行
+if [[ "$ID" =~ ^(debian|ubuntu|centos|rhel|almalinux|rocky|oracle|fedora|alpine|arch|manjaro|opensuse|kali|pop|linuxmint|deepin|elementary|armbian)$ ]] || \
+   [[ "$ID_LIKE" =~ (debian|ubuntu|rhel|centos|fedora|arch|suse) ]]; then
   :
 else
-  echo -e "\n${RED}[错误] 本脚本仅支持 Debian 13 (Trixie) 系统！当前系统: ${NAME:-$ID} ${VERSION_ID}${NC}\n"
+  echo -e "\n${RED}[错误] 不支持的操作系统: ${ID}${NC}\n"
   exit 1
 fi
 else
-echo -e "\n${RED}[错误] 无法识别的操作系统！本脚本仅支持 Debian 13 (Trixie) 系统。${NC}\n"
+echo -e "\n${RED}[错误] 无法识别的操作系统！${NC}\n"
 exit 1
 fi
 if ! grep -qE "^[[:space:]]*[0-9:.]+[[:space:]].*(^|[[:space:]])$(hostname)([[:space:]]|$)" /etc/hosts; then
@@ -220,19 +227,24 @@ fix_dpkg() {
 }
 
 _svc_restart() {
-  /bin/systemctl restart "$1"
+  if command -v apk &>/dev/null; then service "$1" restart
+  else /bin/systemctl restart "$1"; fi
 }
 _svc_start() {
-  /bin/systemctl start "$1"
+  if command -v apk &>/dev/null; then service "$1" start
+  else /bin/systemctl start "$1"; fi
 }
 _svc_stop() {
-  /bin/systemctl stop "$1"
+  if command -v apk &>/dev/null; then service "$1" stop
+  else /bin/systemctl stop "$1"; fi
 }
 _svc_enable() {
-  /bin/systemctl enable "$1"
+  if command -v apk &>/dev/null; then rc-update add "$1" default
+  else /bin/systemctl enable "$1"; fi
 }
 _svc_is_active() {
-  timeout 5 /bin/systemctl is-active --quiet "$1" 2>/dev/null
+  if command -v apk &>/dev/null; then timeout 5 service "$1" status &>/dev/null
+  else timeout 5 /bin/systemctl is-active --quiet "$1" 2>/dev/null; fi
 }
 
 _svc_main_pid() {
@@ -296,23 +308,27 @@ _set_sshd_option() {
 _svc_reload() {
   if _svc_is_active "$1" 2>/dev/null; then
     local OLD_PID; OLD_PID=$(_svc_main_pid "$1")
-    if timeout 10 /bin/systemctl reload "$1" 2>/dev/null; then
-      sleep 1
-      if _svc_is_active "$1" 2>/dev/null; then
-        echo -e "${GREEN}  ✓ $1 热重载成功${NC}"
-        return 0
+    if command -v apk &>/dev/null; then
+      timeout 10 service "$1" reload 2>/dev/null && { echo -e "${GREEN}  ✓ $1 热重载成功${NC}"; return 0; }
+    else
+      if timeout 10 /bin/systemctl reload "$1" 2>/dev/null; then
+        sleep 1
+        if _svc_is_active "$1" 2>/dev/null; then
+          echo -e "${GREEN}  ✓ $1 热重载成功${NC}"
+          return 0
+        fi
+        echo -e "${YELLOW}[警告] $1 reload 后服务已退出；为避免部署中途断网，本次不会自动拉起。${NC}"
+        return 1
       fi
-      echo -e "${YELLOW}[警告] $1 reload 后服务已退出；为避免部署中途断网，本次不会自动拉起。${NC}"
-      return 1
-    fi
-    if [ -n "$OLD_PID" ] && timeout 5 /bin/kill -HUP "$OLD_PID" 2>/dev/null; then
-      sleep 1
-      if _svc_is_active "$1" 2>/dev/null; then
-        echo -e "${GREEN}  ✓ $1 热重载成功 (kill -HUP)${NC}"
-        return 0
+      if [ -n "$OLD_PID" ] && timeout 5 /bin/kill -HUP "$OLD_PID" 2>/dev/null; then
+        sleep 1
+        if _svc_is_active "$1" 2>/dev/null; then
+          echo -e "${GREEN}  ✓ $1 热重载成功 (kill -HUP)${NC}"
+          return 0
+        fi
+        echo -e "${YELLOW}[警告] $1 HUP 后服务已退出；为避免部署中途断网，本次不会自动拉起。${NC}"
+        return 1
       fi
-      echo -e "${YELLOW}[警告] $1 HUP 后服务已退出；为避免部署中途断网，本次不会自动拉起。${NC}"
-      return 1
     fi
     local NEW_PID; NEW_PID=$(_svc_main_pid "$1")
     if [ -n "$OLD_PID" ] && [ -n "$NEW_PID" ] && [ "$OLD_PID" != "$NEW_PID" ]; then
@@ -329,13 +345,18 @@ _svc_reload() {
 
 _svc_delayed_restart() {
   local service_name="$1" delay="${2:-30}"
+  if command -v apk &>/dev/null; then
+    ( sleep "$delay"; service "$service_name" restart >/dev/null 2>&1 ) >/dev/null 2>&1 &
+    return 0
+  fi
   if command -v systemd-run >/dev/null 2>&1; then
     systemd-run --on-active="${delay}s" --unit="vpsbox-delayed-${service_name}-restart" /bin/systemctl restart "$service_name" >/dev/null 2>&1 && return 0
   fi
   ( sleep "$delay"; /bin/systemctl restart "$service_name" >/dev/null 2>&1 ) >/dev/null 2>&1 &
 }
 _svc_daemon_reload() {
-  /bin/systemctl daemon-reload 2>/dev/null
+  if command -v apk &>/dev/null; then return 0
+  else /bin/systemctl daemon-reload 2>/dev/null; fi
 }
 
 _valid_port() {
@@ -351,7 +372,13 @@ _port_is_listening() {
   esac
 }
 
-
+_ufw_allow_if_active() {
+  local port="$1" proto="$2"
+  if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -qi "Status: active"; then
+    ufw allow "${port}/${proto}" >/dev/null 2>&1 || true
+    ufw reload >/dev/null 2>&1 || true
+  fi
+}
 
 _json_escape() {
   jq -Rn --arg v "$1" '$v'
@@ -371,23 +398,43 @@ _fragment_file_for_node() {
 }
 
 _node_meta_file_for_core() {
-  echo "$SING_BOX_META_FILE"
+  case "$1" in
+    Xray) echo "$XRAY_META_FILE" ;;
+    Sing-box) echo "$SINGBOX_META_FILE" ;;
+    *) return 1 ;;
+  esac
 }
 
 _node_dir_for_core() {
-  echo "$SING_BOX_NODES_DIR"
+  case "$1" in
+    Xray) echo "$XRAY_NODES_DIR" ;;
+    Sing-box) echo "$SINGBOX_NODES_DIR" ;;
+    *) return 1 ;;
+  esac
 }
 
 _config_file_for_core() {
-  echo "$SING_BOX_CONFIG_FILE"
+  case "$1" in
+    Xray) echo "$XRAY_CONFIG_FILE" ;;
+    Sing-box) echo "$SINGBOX_CONFIG_FILE" ;;
+    *) return 1 ;;
+  esac
 }
 
 _service_name_for_core() {
-  echo "sing-box"
+  case "$1" in
+    Xray) echo "xray" ;;
+    Sing-box) echo "sing-box" ;;
+    *) return 1 ;;
+  esac
 }
 
 _runtime_dir_for_core() {
-  echo "$SING_BOX_RUNTIME_DIR"
+  case "$1" in
+    Xray) echo "$XRAY_RUNTIME_DIR" ;;
+    Sing-box) echo "$SINGBOX_RUNTIME_DIR" ;;
+    *) return 1 ;;
+  esac
 }
 
 _ensure_node_meta_file() {
@@ -434,22 +481,23 @@ _node_meta_upsert() {
   fi
 }
 
-
-
-_ensure_sing_box_service_reload_support() {
+_ensure_xray_service_reload_support() {
   if [ ! -d /etc/systemd/system ]; then return 0; fi
   local bin_path
-  bin_path=$(command -v sing-box || echo "/usr/local/bin/sing-box")
+  bin_path=$(command -v xray || echo "/usr/local/bin/xray")
   if [ ! -x "$bin_path" ]; then return 0; fi
-  if [ ! -f "$SING_BOX_SERVICE_FILE" ]; then
-    cat > "$SING_BOX_SERVICE_FILE" <<EOF
+  if [ ! -f "$XRAY_SERVICE_FILE" ]; then
+    cat > "$XRAY_SERVICE_FILE" <<EOF
 [Unit]
-Description=sing-box Service
+Description=Xray Service
 After=network.target nss-lookup.target
 
 [Service]
-User=root
-ExecStart=${bin_path} run -c ${SING_BOX_CONFIG_FILE}
+User=nobody
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
+NoNewPrivileges=true
+ExecStart=${bin_path} run -config ${XRAY_CONFIG_FILE}
 ExecReload=/bin/kill -HUP $MAINPID
 Restart=on-failure
 RestartPreventExitStatus=23
@@ -460,10 +508,10 @@ LimitNOFILE=1000000
 WantedBy=multi-user.target
 EOF
     _svc_daemon_reload >/dev/null 2>&1 || true
-  elif ! grep -q '^ExecReload=' "$SING_BOX_SERVICE_FILE"; then
+  elif ! grep -q '^ExecReload=' "$XRAY_SERVICE_FILE"; then
     local tmp_service; tmp_service=$(mktemp) || return 0
-    if awk '1; /^ExecStart=/{print "ExecReload=/bin/kill -HUP $MAINPID"}' "$SING_BOX_SERVICE_FILE" > "$tmp_service"; then
-      mv "$tmp_service" "$SING_BOX_SERVICE_FILE"
+    if awk '1; /^ExecStart=/{print "ExecReload=/bin/kill -HUP $MAINPID"}' "$XRAY_SERVICE_FILE" > "$tmp_service"; then
+      mv "$tmp_service" "$XRAY_SERVICE_FILE"
       _svc_daemon_reload >/dev/null 2>&1 || true
     else
       rm -f "$tmp_service"
@@ -471,14 +519,65 @@ EOF
   fi
 }
 
+_ensure_singbox_service_reload_support() {
+  if [ ! -d /etc/systemd/system ]; then return 0; fi
+  local bin_path
+  bin_path=$(command -v sing-box || echo "/usr/local/bin/sing-box")
+  if [ ! -x "$bin_path" ]; then return 0; fi
+  if [ ! -f "$SINGBOX_SERVICE_FILE" ]; then
+    cat > "$SINGBOX_SERVICE_FILE" <<EOF
+[Unit]
+Description=sing-box Service
+After=network.target nss-lookup.target
 
+[Service]
+User=root
+ExecStart=${bin_path} run -c ${SINGBOX_CONFIG_FILE}
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartPreventExitStatus=23
+LimitNPROC=500
+LimitNOFILE=1000000
 
-_emit_sing_box_merged_config() {
+[Install]
+WantedBy=multi-user.target
+EOF
+    _svc_daemon_reload >/dev/null 2>&1 || true
+  elif ! grep -q '^ExecReload=' "$SINGBOX_SERVICE_FILE"; then
+    local tmp_service; tmp_service=$(mktemp) || return 0
+    if awk '1; /^ExecStart=/{print "ExecReload=/bin/kill -HUP $MAINPID"}' "$SINGBOX_SERVICE_FILE" > "$tmp_service"; then
+      mv "$tmp_service" "$SINGBOX_SERVICE_FILE"
+      _svc_daemon_reload >/dev/null 2>&1 || true
+    else
+      rm -f "$tmp_service"
+    fi
+  fi
+}
+
+_emit_xray_merged_config() {
   local tmp_out="$1"
-  mkdir -p "$SING_BOX_NODES_DIR" "$SING_BOX_RUNTIME_DIR"
+  mkdir -p "$XRAY_NODES_DIR" "$XRAY_RUNTIME_DIR"
   local nodes_json='[]'
   shopt -s nullglob
-  local files=("$SING_BOX_NODES_DIR"/*.json)
+  local files=("$XRAY_NODES_DIR"/*.json)
+  shopt -u nullglob
+  if [ ${#files[@]} -gt 0 ]; then
+    nodes_json=$(jq -s 'map(select(type=="object"))' "${files[@]}" 2>/dev/null) || return 1
+  fi
+  jq -n --argjson inbounds "$nodes_json" '{
+    log:{loglevel:"warning"},
+    inbounds:$inbounds,
+    outbounds:[{protocol:"freedom", tag:"direct"}],
+    routing:{domainStrategy:"AsIs", rules:[]}
+  }' > "$tmp_out"
+}
+
+_emit_singbox_merged_config() {
+  local tmp_out="$1"
+  mkdir -p "$SINGBOX_NODES_DIR" "$SINGBOX_RUNTIME_DIR"
+  local nodes_json='[]'
+  shopt -s nullglob
+  local files=("$SINGBOX_NODES_DIR"/*.json)
   shopt -u nullglob
   if [ ${#files[@]} -gt 0 ]; then
     nodes_json=$(jq -s 'map(select(type=="object"))' "${files[@]}" 2>/dev/null) || return 1
@@ -495,9 +594,16 @@ _validate_generated_config() {
   local core_name="$1" tmp_file="$2"
   local validate_out; validate_out=$(mktemp)
   local ok=0
-  local sb_bin; sb_bin=$(command -v sing-box || echo "/usr/local/bin/sing-box")
-  if timeout 10 "$sb_bin" check -c "$tmp_file" >"$validate_out" 2>&1; then
-    ok=1
+  if [ "$core_name" == "Sing-box" ]; then
+    local sb_bin; sb_bin=$(command -v sing-box || echo "/usr/local/bin/sing-box")
+    if timeout 10 "$sb_bin" check -c "$tmp_file" >"$validate_out" 2>&1; then
+      ok=1
+    fi
+  else
+    local x_bin; x_bin=$(command -v xray || echo "/usr/local/bin/xray")
+    if "$x_bin" run -test -c "$tmp_file" >"$validate_out" 2>&1; then
+      ok=1
+    fi
   fi
   if [ "$ok" -eq 1 ]; then
     rm -f "$validate_out"
@@ -530,13 +636,25 @@ rebuild_core_config() {
   runtime_dir=$(_runtime_dir_for_core "$core_name") || return 1
   mkdir -p "$runtime_dir"
   tmp_file=$(mktemp --suffix=.json) || return 1
-  _emit_sing_box_merged_config "$tmp_file" || { rm -f "$tmp_file"; return 1; }
+  if [ "$core_name" == "Xray" ]; then
+    _emit_xray_merged_config "$tmp_file" || { rm -f "$tmp_file"; return 1; }
+    if ! jq -e '.inbounds | all(type=="object" and has("protocol"))' "$tmp_file" >/dev/null 2>&1; then
+      echo -e "${RED}[校验错误] Xray 节点片段包含不兼容对象，已拦截。${NC}"
+      rm -f "$tmp_file"
+      return 1
+    fi
+  else
+    _emit_singbox_merged_config "$tmp_file" || { rm -f "$tmp_file"; return 1; }
+  fi
   if ! _validate_generated_config "$core_name" "$tmp_file"; then
     rm -f "$tmp_file"
     return 1
   fi
   mv "$tmp_file" "$config_file"
   chmod 644 "$config_file" 2>/dev/null || true
+  if [ "$core_name" = "Xray" ]; then
+    find "$(dirname "$config_file")" -type f \( -name '*.pem' -o -name '*.crt' -o -name '*.key' \) -exec chmod 644 {} \; 2>/dev/null || true
+  fi
   return 0
 }
 
@@ -547,11 +665,19 @@ write_node_fragment() {
   mkdir -p "$node_dir"
   tmp_file=$(mktemp) || return 1
   final_file=$(_fragment_file_for_node "$core_name" "$port" "$protocol") || { rm -f "$tmp_file"; return 1; }
-  printf '%s\n' "$node_json" > "$tmp_file"
+  printf '%s
+' "$node_json" > "$tmp_file"
   if ! jq empty "$tmp_file" >/dev/null 2>&1; then
     rm -f "$tmp_file"
     echo -e "${RED}[错误] 节点片段 JSON 无效，已取消写入。${NC}"
     return 1
+  fi
+  if [ "$core_name" = "Xray" ]; then
+    if ! jq -e 'has("protocol") or has("type")' "$tmp_file" >/dev/null 2>&1; then
+      rm -f "$tmp_file"
+      echo -e "${RED}[错误] Xray 节点片段缺少协议字段，已取消写入。${NC}"
+      return 1
+    fi
   fi
   mv "$tmp_file" "$final_file"
   echo "$final_file"
@@ -619,10 +745,22 @@ remove_node_runtime() {
 }
 
 _pkg_install() {
-  DEBIAN_FRONTEND=noninteractive apt-get install -y "$@"
+  if command -v apt &>/dev/null; then DEBIAN_FRONTEND=noninteractive apt-get install -y "$@"
+  elif command -v dnf &>/dev/null; then dnf install -y "$@"
+  elif command -v yum &>/dev/null; then yum install -y "$@"
+  elif command -v apk &>/dev/null; then apk add "$@"
+  elif command -v pacman &>/dev/null; then pacman -S --noconfirm "$@"
+  elif command -v zypper &>/dev/null; then zypper install -y "$@"
+  else echo -e "${RED}[错误] 未识别的包管理器！${NC}"; fi
 }
 _pkg_remove() {
-  DEBIAN_FRONTEND=noninteractive apt-get remove --purge -y "$@"
+  if command -v apt &>/dev/null; then DEBIAN_FRONTEND=noninteractive apt-get remove --purge -y "$@"
+  elif command -v dnf &>/dev/null; then dnf remove -y "$@"
+  elif command -v yum &>/dev/null; then yum remove -y "$@"
+  elif command -v apk &>/dev/null; then apk del "$@"
+  elif command -v pacman &>/dev/null; then pacman -Rns --noconfirm "$@"
+  elif command -v zypper &>/dev/null; then zypper remove -y "$@"
+  else echo -e "${RED}[错误] 未识别的包管理器！${NC}"; fi
 }
 
 _run_remote_bash() {
@@ -676,28 +814,57 @@ local missing_apps=()
 for app in "${apps[@]}"; do
 if ! command -v "$app" &> /dev/null; then missing_apps+=("$app"); fi
 done
-if ! command -v cron &>/dev/null; then
+if ! command -v crond &>/dev/null && ! command -v cron &>/dev/null; then
   missing_apps+=("cron")
 fi
 [ ${#missing_apps[@]} -eq 0 ] && return
 
 echo -e "\n${CYAN}[系统] 检测到缺失必要底层组件，正在自动补全...${NC}"
-fix_dpkg
-DEBIAN_FRONTEND=noninteractive apt-get update -y > "$INSTALL_LOG" 2>&1
-DEBIAN_FRONTEND=noninteractive apt-get install -y curl wget sudo unzip tar openssl socat psmisc iputils-ping jq gnupg2 dnsutils bsdutils qrencode cron lsb-release >> "$INSTALL_LOG" 2>&1
-_svc_enable cron 2>>"$INSTALL_LOG" || true
-_svc_start cron 2>>"$INSTALL_LOG" || true
+if command -v apt &>/dev/null; then
+  fix_dpkg
+  DEBIAN_FRONTEND=noninteractive apt-get update -y > "$INSTALL_LOG" 2>&1
+  DEBIAN_FRONTEND=noninteractive apt-get install -y curl wget sudo unzip tar openssl socat psmisc iputils-ping jq gnupg2 dnsutils bsdutils qrencode cron lsb-release >> "$INSTALL_LOG" 2>&1
+elif command -v dnf &>/dev/null; then
+  dnf install -y curl wget sudo unzip tar openssl socat psmisc iputils jq gnupg2 bind-utils qrencode cronie >> "$INSTALL_LOG" 2>&1
+elif command -v yum &>/dev/null; then
+  yum install -y curl wget sudo unzip tar openssl socat psmisc iputils jq gnupg2 bind-utils qrencode cronie >> "$INSTALL_LOG" 2>&1
+elif command -v apk &>/dev/null; then
+  apk add curl wget sudo unzip tar openssl socat psmisc iputils jq gnupg qrencode dcron >> "$INSTALL_LOG" 2>&1
+elif command -v pacman &>/dev/null; then
+  pacman -S --noconfirm curl wget sudo unzip tar openssl socat psmisc iputils jq gnupg qrencode cronie >> "$INSTALL_LOG" 2>&1
+elif command -v zypper &>/dev/null; then
+  zypper install -y curl wget sudo unzip tar openssl socat psmisc iputils jq gpg2 bind-utils qrencode cronie >> "$INSTALL_LOG" 2>&1
+fi
+_svc_enable cron 2>>"$INSTALL_LOG" || _svc_enable crond 2>>"$INSTALL_LOG" || true
+_svc_start cron 2>>"$INSTALL_LOG" || _svc_start crond 2>>"$INSTALL_LOG" || true
 }
 
 system_update() {
 clear_screen; print_divider
 print_center "[ 更新系统与安装必备组件 ]" "$CYAN"
 if ! confirm_action "更新系统与安装组件"; then pause_for_enter; return; fi
-echo -e "\n${CYAN}>>> 正在执行系统更新...${NC}"
+echo -e "\n${CYAN}>>> 正在检测包管理器并执行系统更新...${NC}"
 
-fix_dpkg
-DEBIAN_FRONTEND=noninteractive apt update -y
-DEBIAN_FRONTEND=noninteractive apt full-upgrade -y
+if command -v dnf &>/dev/null; then
+  dnf -y update
+elif command -v yum &>/dev/null; then
+  yum -y update
+elif command -v apt &>/dev/null; then
+  fix_dpkg
+  DEBIAN_FRONTEND=noninteractive apt update -y
+  DEBIAN_FRONTEND=noninteractive apt full-upgrade -y
+elif command -v apk &>/dev/null; then
+  apk update && apk upgrade
+elif command -v pacman &>/dev/null; then
+  pacman -Syu --noconfirm
+elif command -v zypper &>/dev/null; then
+  zypper refresh
+  zypper update -y
+elif command -v opkg &>/dev/null; then
+  opkg update
+else
+  echo -e "\n${RED}[错误] 未识别的包管理器！${NC}"; pause_for_enter; return
+fi
 
 echo -e "\n${GREEN}[成功] 系统更新完毕！${NC}"
 pause_for_enter
@@ -707,15 +874,60 @@ system_clean() {
 clear_screen; print_divider
 print_center "[ 系统垃圾与废弃依赖清理 ]" "$CYAN"
 if ! confirm_action "清理系统垃圾与冗余日志"; then pause_for_enter; return; fi
-echo -e "\n${CYAN}>>> 正在执行系统清理...${NC}"
+echo -e "\n${CYAN}>>> 正在检测包管理器并执行系统清理...${NC}"
 
-fix_dpkg
-apt autoremove --purge -y
-apt clean -y
-apt autoclean -y
-journalctl --rotate 2>/dev/null
-journalctl --vacuum-time=1s 2>/dev/null
-journalctl --vacuum-size=500M 2>/dev/null
+if command -v dnf &>/dev/null; then
+  rpm --rebuilddb
+  dnf autoremove -y
+  dnf clean all
+  dnf makecache
+  journalctl --rotate 2>/dev/null
+  journalctl --vacuum-time=1s 2>/dev/null
+  journalctl --vacuum-size=500M 2>/dev/null
+elif command -v yum &>/dev/null; then
+  rpm --rebuilddb
+  yum autoremove -y
+  yum clean all
+  yum makecache
+  journalctl --rotate 2>/dev/null
+  journalctl --vacuum-time=1s 2>/dev/null
+  journalctl --vacuum-size=500M 2>/dev/null
+elif command -v apt &>/dev/null; then
+  fix_dpkg
+  apt autoremove --purge -y
+  apt clean -y
+  apt autoclean -y
+  journalctl --rotate 2>/dev/null
+  journalctl --vacuum-time=1s 2>/dev/null
+  journalctl --vacuum-size=500M 2>/dev/null
+elif command -v apk &>/dev/null; then
+  apk cache clean
+  rm -rf /var/cache/apk/*
+  find /tmp -mindepth 1 -mtime +1 -delete 2>/dev/null
+  find /var/log -type f -exec truncate -s 0 {} \; 2>/dev/null
+elif command -v pacman &>/dev/null; then
+  local pacman_orphans
+  pacman_orphans=$(pacman -Qdtq 2>/dev/null || true)
+  if [ -n "$pacman_orphans" ]; then
+    # shellcheck disable=SC2086
+    pacman -Rns $pacman_orphans --noconfirm 2>/dev/null || true
+  fi
+  pacman -Scc --noconfirm
+  journalctl --rotate 2>/dev/null
+  journalctl --vacuum-time=1s 2>/dev/null
+  journalctl --vacuum-size=500M 2>/dev/null
+elif command -v zypper &>/dev/null; then
+  zypper clean --all
+  zypper refresh
+  journalctl --rotate 2>/dev/null
+  journalctl --vacuum-time=1s 2>/dev/null
+  journalctl --vacuum-size=500M 2>/dev/null
+elif command -v opkg &>/dev/null; then
+  find /tmp -mindepth 1 -mtime +1 -delete 2>/dev/null
+  find /var/log -type f -exec truncate -s 0 {} \; 2>/dev/null
+else
+  echo -e "\n${RED}[错误] 未识别的包管理器！${NC}"; pause_for_enter; return
+fi
 
 echo -e "\n${GREEN}[成功] 系统清理完毕，存储空间已释放！${NC}"
 pause_for_enter
@@ -1082,10 +1294,27 @@ fi
 
 _bbr_check_sys() {
   BBR_ARCH=$(uname -m)
-  BBR_OS_ID="debian"
-  BBR_OS_TYPE="Debian"
-  BBR_OS_VER="13"
-  BBR_OS_LIKE="debian"
+  BBR_OS_ID=""; BBR_OS_TYPE=""; BBR_OS_VER=""; BBR_OS_LIKE=""
+  if [[ -f /etc/os-release ]]; then
+    # shellcheck disable=SC1091
+    . /etc/os-release
+    BBR_OS_ID="${ID:-unknown}"
+    BBR_OS_VER="${VERSION_ID:-}"
+    BBR_OS_LIKE="${ID_LIKE:-}"
+    if [[ -z "$BBR_OS_VER" && "$BBR_OS_ID" == "debian" && -f /etc/debian_version ]]; then
+      BBR_OS_VER=$(grep -oE '^[0-9]+' /etc/debian_version | head -1)
+      [[ -z "$BBR_OS_VER" ]] && BBR_OS_VER=$(awk -F'/' '{print $1}' /etc/debian_version)
+    fi
+    [[ -z "$BBR_OS_VER" ]] && BBR_OS_VER="unknown"
+  fi
+  if [[ "$BBR_OS_ID" =~ ^(centos|rhel|almalinux|rocky|oracle|fedora)$ ]] || [[ "$BBR_OS_LIKE" =~ (rhel|centos|fedora) ]]; then
+    BBR_OS_TYPE="CentOS"
+    BBR_OS_VER=$(echo "$BBR_OS_VER" | awk -F'.' '{print $1}')
+  elif [[ "$BBR_OS_ID" =~ ^(debian|ubuntu|pop|kali|linuxmint|deepin|elementary|armbian)$ ]] || [[ "$BBR_OS_LIKE" =~ (debian|ubuntu) ]]; then
+    BBR_OS_TYPE="Debian"
+  else
+    BBR_OS_TYPE="Unknown"
+  fi
 }
 
 _bbr_check_cn() {
@@ -1138,14 +1367,28 @@ _bbr_remove_old_headers() {
   local current_kernel current_version
   current_kernel=$(uname -r)
   current_version=${current_kernel%%-*}
-  dpkg-query -W -f='${Package}\n' 'linux-headers-*' 2>/dev/null | grep -vF "$current_kernel" | grep -vF "$current_version" | xargs -r apt-get purge -y >/dev/null 2>&1
-  apt-get autoremove -y >/dev/null 2>&1
+  if [[ "$BBR_OS_TYPE" == "CentOS" ]]; then
+    rpm -qa | grep -E '^kernel-headers' | grep -vF "$current_kernel" | grep -vF "$current_version" | xargs -r rpm -e --nodeps >/dev/null 2>&1
+  elif [[ "$BBR_OS_TYPE" == "Debian" ]]; then
+    dpkg-query -W -f='${Package}\n' 'linux-headers-*' 2>/dev/null | grep -vF "$current_kernel" | grep -vF "$current_version" | xargs -r apt-get purge -y >/dev/null 2>&1
+    apt-get autoremove -y >/dev/null 2>&1
+  fi
 }
 
 _bbr_grub() {
   echo -e "  ${CYAN}>>> 更新系统引导...${NC}"
-  command -v update-grub &>/dev/null || apt-get install -y grub2-common >/dev/null 2>&1
-  update-grub >/dev/null 2>&1
+  if [[ "$BBR_OS_TYPE" == "CentOS" ]]; then
+    if command -v grubby &>/dev/null; then
+      local lk; lk=$(grubby --info=ALL | awk -F= '/^kernel/{print $2}' | head -1)
+      [[ -n "$lk" ]] && grubby --set-default="$lk" >/dev/null 2>&1
+    else
+      [[ -f /boot/grub2/grub.cfg ]] && grub2-mkconfig -o /boot/grub2/grub.cfg >/dev/null 2>&1
+      grub2-set-default 0
+    fi
+  elif [[ "$BBR_OS_TYPE" == "Debian" ]]; then
+    command -v update-grub &>/dev/null || apt-get install -y grub2-common >/dev/null 2>&1
+    update-grub >/dev/null 2>&1
+  fi
 }
 
 _bbr_install_kernel() {
@@ -1157,13 +1400,24 @@ _bbr_install_kernel() {
   _bbr_remove_old_headers
   local wdir="/tmp/bbr_install_$$"
   mkdir -p "$wdir" && cd "$wdir" || return 1
-  [[ -n "$head_url" ]] && { _bbr_safe_wget "$head_url" "linux-headers.deb" || { cd /tmp || return 1; rm -rf "$wdir"; return 1; }; }
-  _bbr_safe_wget "$img_url" "linux-image.deb" || { cd /tmp || return 1; rm -rf "$wdir"; return 1; }
-  echo -e "  ${CYAN}>>> 执行 DPKG 安装...${NC}"
-  dpkg -i linux-image.deb || { cd /tmp || return 1; rm -rf "$wdir"; echo -e "  ${RED}[错误] 内核镜像安装失败。${NC}"; return 1; }
-  [[ -n "$head_url" ]] && dpkg -i linux-headers.deb || [[ -z "$head_url" ]] || { cd /tmp || return 1; rm -rf "$wdir"; echo -e "  ${RED}[错误] 内核头文件安装失败。${NC}"; return 1; }
-  echo -e "  ${CYAN}>>> 修复依赖...${NC}"
-  apt-get install -f -y || { cd /tmp || return 1; rm -rf "$wdir"; echo -e "  ${RED}[错误] 内核依赖修复失败。${NC}"; return 1; }
+  if [[ "$BBR_OS_TYPE" == "CentOS" ]]; then
+    [[ -n "$head_url" ]] && { _bbr_safe_wget "$head_url" "kernel-headers.rpm" || { cd /tmp || return 1; rm -rf "$wdir"; return 1; }; }
+    _bbr_safe_wget "$img_url" "kernel-image.rpm" || { cd /tmp || return 1; rm -rf "$wdir"; return 1; }
+    echo -e "  ${CYAN}>>> 执行 YUM 安装...${NC}"
+    if [[ -n "$head_url" ]]; then
+      yum install -y kernel-image.rpm kernel-headers.rpm || { cd /tmp || return 1; rm -rf "$wdir"; echo -e "  ${RED}[错误] 内核安装失败。${NC}"; return 1; }
+    else
+      yum install -y kernel-image.rpm || { cd /tmp || return 1; rm -rf "$wdir"; echo -e "  ${RED}[错误] 内核安装失败。${NC}"; return 1; }
+    fi
+  elif [[ "$BBR_OS_TYPE" == "Debian" ]]; then
+    [[ -n "$head_url" ]] && { _bbr_safe_wget "$head_url" "linux-headers.deb" || { cd /tmp || return 1; rm -rf "$wdir"; return 1; }; }
+    _bbr_safe_wget "$img_url" "linux-image.deb" || { cd /tmp || return 1; rm -rf "$wdir"; return 1; }
+    echo -e "  ${CYAN}>>> 执行 DPKG 安装...${NC}"
+    dpkg -i linux-image.deb || { cd /tmp || return 1; rm -rf "$wdir"; echo -e "  ${RED}[错误] 内核镜像安装失败。${NC}"; return 1; }
+    [[ -n "$head_url" ]] && dpkg -i linux-headers.deb || [[ -z "$head_url" ]] || { cd /tmp || return 1; rm -rf "$wdir"; echo -e "  ${RED}[错误] 内核头文件安装失败。${NC}"; return 1; }
+    echo -e "  ${CYAN}>>> 修复依赖...${NC}"
+    apt-get install -f -y || { cd /tmp || return 1; rm -rf "$wdir"; echo -e "  ${RED}[错误] 内核依赖修复失败。${NC}"; return 1; }
+  fi
   cd /tmp && rm -rf "$wdir"
   _bbr_grub
   echo -e "\n  ${GREEN}[完成] ${desc} 内核包安装完毕！${NC}"
@@ -1842,7 +2096,11 @@ _bbr_set_ecn() {
 _bbr_show_kernels() {
   clear_screen; print_divider
   print_center "[ 已安装内核 ]" "$CYAN"
-  dpkg -l | grep -E "^ii  linux-(image|headers)" | awk '{print $2, $3}' | column -t | sort -V
+  if [[ "$BBR_OS_TYPE" == "CentOS" ]]; then
+    rpm -qa | grep -E "^kernel(-ml|-lt)?-" | sort -V 2>/dev/null || echo "  未检测到内核包"
+  elif [[ "$BBR_OS_TYPE" == "Debian" ]]; then
+    dpkg -l | grep -E "^ii  linux-(image|headers)" | awk '{print $2, $3}' | column -t | sort -V
+  fi
   echo -e "\n  ${CYAN}当前运行内核:${NC} ${YELLOW}$(uname -r)${NC}"
   echo -e "\n  ${CYAN}/boot 目录下:${NC}"
   ls -1v /boot/vmlinuz-* 2>/dev/null || echo "  无"
@@ -1877,7 +2135,11 @@ _bbr_delete_kernel() {
   print_center "[ 删除内核 ]" "$RED"
   local current_kernel; current_kernel=$(uname -r)
   local kernel_list=()
-  mapfile -t kernel_list < <(dpkg-query -W -f='${Package}\n' | grep -E "^linux-(image|headers)" | sort -V)
+  if [[ "$BBR_OS_TYPE" == "CentOS" ]]; then
+    mapfile -t kernel_list < <(rpm -qa | grep -E "^kernel(-ml|-lt)?-" | sort -V)
+  elif [[ "$BBR_OS_TYPE" == "Debian" ]]; then
+    mapfile -t kernel_list < <(dpkg-query -W -f='${Package}\n' | grep -E "^linux-(image|headers)" | sort -V)
+  fi
   if [[ ${#kernel_list[@]} -eq 0 ]]; then echo -e "  未检测到内核包。"; pause_for_enter; return; fi
   echo -e "  ${CYAN}当前运行:${NC} ${GREEN}${current_kernel}${NC}\n"
   for i in "${!kernel_list[@]}"; do
@@ -1902,9 +2164,14 @@ _bbr_delete_kernel() {
   else
     read -r -p "> 确认删除？(Y/n): " confirm; [[ "$confirm" =~ ^[nN]$ ]] && return
   fi
-  # shellcheck disable=SC2086
-  apt-get purge -y $pkgs_to_del
-  apt-get autoremove -y >/dev/null 2>&1
+  if [[ "$BBR_OS_TYPE" == "CentOS" ]]; then
+    # shellcheck disable=SC2086
+    rpm -e --nodeps $pkgs_to_del
+  elif [[ "$BBR_OS_TYPE" == "Debian" ]]; then
+    # shellcheck disable=SC2086
+    apt-get purge -y $pkgs_to_del
+    apt-get autoremove -y >/dev/null 2>&1
+  fi
   _bbr_grub
   echo -e "\n${GREEN}[完成] 内核已删除。${NC}"; pause_for_enter
 }
@@ -1987,6 +2254,7 @@ _bbr_sysctl_edit() {
 _bbr_install_bbr_cloud() {
   [[ "$BBR_ARCH" == "x86_64" || "$BBR_ARCH" == "aarch64" ]] || { echo -e "\n${RED}[错误] 不支持架构: $BBR_ARCH${NC}"; pause_for_enter; return; }
   local tag_kw="Debian_Kernel_Cloud"; local arch_kw="amd64"; local img_kw="image"
+  [[ "$BBR_OS_TYPE" == "CentOS" ]] && { tag_kw="CentOS_Kernel_Cloud"; arch_kw="x86_64"; img_kw="kernel-[0-9]"; }
   [[ "$BBR_ARCH" == "aarch64" ]] && { tag_kw="Debian_Kernel_Cloud_arm64"; arch_kw="arm64"; }
   echo -e "\n${CYAN}>>> 正在向 ylx2016/kernel 请求最新 Cloud 内核...${NC}"
   local head_url; head_url=$(_bbr_github_asset "ylx2016/kernel" "$tag_kw" "headers" "$arch_kw")
@@ -1999,17 +2267,19 @@ _bbr_install_bbr_cloud() {
 _bbr_install_bbrplus_new() {
   [[ "$BBR_ARCH" == "x86_64" || "$BBR_ARCH" == "aarch64" ]] || { echo -e "\n${RED}[错误] 不支持架构: $BBR_ARCH${NC}"; pause_for_enter; return; }
   local ext="deb"; local arch_kw="amd64"
+  [[ "$BBR_OS_TYPE" == "CentOS" ]] && ext="rpm"
   [[ "$BBR_ARCH" == "aarch64" ]] && arch_kw="arm64"
   local tag_kw="bbrplus-6."
   echo -e "\n${CYAN}>>> 正在向 UJX6N/bbrplus-6.x_stable 请求数据...${NC}"
   local head_url; head_url=$(_bbr_github_asset "UJX6N/bbrplus-6.x_stable" "$tag_kw" "headers" "${arch_kw}.*${ext}")
   local img_url; img_url=$(_bbr_github_asset "UJX6N/bbrplus-6.x_stable" "$tag_kw" "image" "${arch_kw}.*${ext}")
-  [[ -z "$img_url" ]] && { echo -e "${RED}[错误] 未获取到发行版链接. ${NC}"; pause_for_enter; return; }
+  [[ -z "$img_url" ]] && { echo -e "${RED}[错误] 未获取到发行版链接。${NC}"; pause_for_enter; return; }
   _bbr_install_kernel "BBRplus(UJX6N) 新版内核" "$head_url" "$img_url"
   pause_for_enter
 }
 
 _bbr_install_debian_cloud() {
+  [[ "$BBR_OS_TYPE" != "Debian" ]] && { echo -e "\n${RED}[错误] Cloud 内核仅支持 Debian 系。${NC}"; pause_for_enter; return; }
   local img_url_base img_pattern
   if [[ "$BBR_ARCH" == "x86_64" ]]; then
     img_url_base="https://deb.debian.org/debian/pool/main/l/linux-signed-amd64/"
@@ -2031,11 +2301,19 @@ _bbr_install_debian_cloud() {
 
 _bbr_install_official_stable() {
   echo -e "\n${CYAN}>>> 安装官方稳定内核...${NC}"
-  apt-get update >/dev/null 2>&1
-  if [[ "$BBR_ARCH" == "x86_64" ]]; then
-    apt-get install linux-image-amd64 linux-headers-amd64 -y
-  elif [[ "$BBR_ARCH" == "aarch64" ]]; then
-    apt-get install linux-image-arm64 linux-headers-arm64 -y
+  if [[ "$BBR_OS_TYPE" == "CentOS" ]]; then
+    [[ "$BBR_ARCH" != "x86_64" ]] && { echo -e "${RED}[错误] 仅支持 x86_64。${NC}"; pause_for_enter; return; }
+    [[ "$BBR_OS_VER" == 7 ]] && yum install kernel kernel-headers -y --skip-broken
+    [[ "$BBR_OS_VER" =~ ^(8|9|10)$ ]] && yum install kernel kernel-core kernel-headers -y --skip-broken
+  elif [[ "$BBR_OS_TYPE" == "Debian" ]]; then
+    apt-get update >/dev/null 2>&1
+    if [[ "$BBR_OS_ID" == "ubuntu" || "$BBR_OS_ID" == "pop" || "$BBR_OS_LIKE" == *"ubuntu"* ]]; then
+      apt-get install linux-image-generic linux-headers-generic -y
+    elif [[ "$BBR_ARCH" == "x86_64" ]]; then
+      apt-get install linux-image-amd64 linux-headers-amd64 -y
+    elif [[ "$BBR_ARCH" == "aarch64" ]]; then
+      apt-get install linux-image-arm64 linux-headers-arm64 -y
+    fi
   fi
   _bbr_grub
   echo -e "\n${GREEN}[完成] 官方稳定内核安装完毕。${NC}"; pause_for_enter
@@ -2043,14 +2321,26 @@ _bbr_install_official_stable() {
 
 _bbr_install_official_latest() {
   echo -e "\n${CYAN}>>> 安装官方最新内核...${NC}"
-  apt-get update >/dev/null 2>&1
-  local codename; codename=$(awk -F= '/^VERSION_CODENAME/{print $2}' /etc/os-release | tr -d '"')
-  [[ -z "$codename" ]] && codename=$(awk -F= '/^VERSION=/{print $2}' /etc/os-release | grep -oP '(?<=\\().*(?=\\))')
-  [[ -n "$codename" ]] && echo "deb http://deb.debian.org/debian ${codename}-backports main" > "/etc/apt/sources.list.d/${codename}-backports.list" && apt-get update >/dev/null 2>&1
-  if [[ "$BBR_ARCH" == "x86_64" ]]; then
-    apt-get install linux-image-amd64 linux-headers-amd64 -y
-  elif [[ "$BBR_ARCH" == "aarch64" ]]; then
-    apt-get install linux-image-arm64 linux-headers-arm64 -y
+  if [[ "$BBR_OS_TYPE" == "CentOS" ]]; then
+    [[ "$BBR_ARCH" != "x86_64" ]] && { echo -e "${RED}[错误] 仅支持 x86_64。${NC}"; pause_for_enter; return; }
+    rpm --import https://www.elrepo.org/RPM-GPG-KEY-elrepo.org
+    yum install "https://www.elrepo.org/elrepo-release-${BBR_OS_VER}.el${BBR_OS_VER}.elrepo.noarch.rpm" -y
+    yum --enablerepo=elrepo-kernel install kernel-ml kernel-ml-headers -y --skip-broken
+  elif [[ "$BBR_OS_TYPE" == "Debian" ]]; then
+    apt-get update >/dev/null 2>&1
+    if [[ "$BBR_OS_ID" == "ubuntu" || "$BBR_OS_ID" == "pop" || "$BBR_OS_LIKE" == *"ubuntu"* ]]; then
+      if apt-cache show "linux-generic-hwe-${BBR_OS_VER}" &>/dev/null; then
+        apt-get install --install-recommends "linux-generic-hwe-${BBR_OS_VER}" -y
+      else
+        apt-get install linux-image-generic linux-headers-generic -y
+      fi
+    elif [[ "$BBR_OS_ID" == "debian" ]]; then
+      local codename; codename=$(awk -F= '/^VERSION_CODENAME/{print $2}' /etc/os-release | tr -d '"')
+      [[ -z "$codename" ]] && codename=$(awk -F= '/^VERSION=/{print $2}' /etc/os-release | grep -oP '(?<=\\().*(?=\\))')
+      [[ -n "$codename" ]] && echo "deb http://deb.debian.org/debian ${codename}-backports main" > "/etc/apt/sources.list.d/${codename}-backports.list" && apt-get update >/dev/null 2>&1
+      if [[ "$BBR_ARCH" == "x86_64" ]]; then apt-get install linux-image-amd64 linux-headers-amd64 -y
+      elif [[ "$BBR_ARCH" == "aarch64" ]]; then apt-get install linux-image-arm64 linux-headers-arm64 -y; fi
+    fi
   fi
   _bbr_grub
   echo -e "\n${GREEN}[完成] 官方最新内核安装完毕。${NC}"; pause_for_enter
@@ -2059,6 +2349,7 @@ _bbr_install_official_latest() {
 _bbr_install_xanmod() {
   local edition="$1"
   [[ "$BBR_ARCH" != "x86_64" ]] && { echo -e "\n${RED}[错误] XanMod 仅支持 x86_64。${NC}"; pause_for_enter; return; }
+  [[ "$BBR_OS_TYPE" != "Debian" ]] && { echo -e "\n${RED}[错误] XanMod 仅支持 Debian/Ubuntu。${NC}"; pause_for_enter; return; }
   echo -e "\n${CYAN}>>> 安装 XanMod (${edition}) 内核...${NC}"
   apt-get update >/dev/null 2>&1
   apt-get install gnupg wget -y >/dev/null 2>&1
@@ -2237,7 +2528,7 @@ echo -e "  ${CYAN}BBR     :${NC} $(get_bbr_status)"
 echo ""
 echo -e "  ${YELLOW}已部署核心状态:${NC}"
 local svc
-for svc in sing-box docker; do
+for svc in xray sing-box docker fail2ban; do
     local s_status
     if command -v systemctl &>/dev/null && systemctl list-unit-files "${svc}.service" &>/dev/null; then
         s_status=$(_svc_is_active "$svc" && echo "active" || echo "inactive")
@@ -2260,7 +2551,22 @@ pause_for_enter
 }
 
 resolve_docker_codename() {
-    echo "trixie"
+    local os_id="${ID:-debian}"
+    local os_codename
+    os_codename=$(lsb_release -cs 2>/dev/null || echo '')
+    if [ "$os_id" = "debian" ]; then
+        case "$os_codename" in
+            bullseye|bookworm) echo "$os_codename" ;;
+            *) echo "bookworm" ;;
+        esac
+    elif [ "$os_id" = "ubuntu" ]; then
+        case "$os_codename" in
+            focal|jammy|noble) echo "$os_codename" ;;
+            *) echo "noble" ;;
+        esac
+    else
+        echo "bookworm"
+    fi
 }
 
 docker_install() {
@@ -2330,7 +2636,83 @@ fi
 pause_for_enter
 }
 
+fail2ban_install() {
+clear_screen; print_divider
+print_center "[ Fail2Ban 暴力破解防护 ]" "$CYAN"
+local FB_LOG="" FB_BACKEND="auto"
+if [ -f /var/log/auth.log ]; then FB_LOG="/var/log/auth.log"
+elif [ -f /var/log/secure ]; then FB_LOG="/var/log/secure"
+elif [ -f /var/log/messages ]; then FB_LOG="/var/log/messages"
+else FB_BACKEND="systemd"; fi
+if command -v fail2ban-client &>/dev/null; then
+echo -e "\n  ${GREEN}Fail2Ban 已安装${NC}"
+echo -e "  ${CYAN}SSH 监狱状态:${NC}"
+fail2ban-client status sshd 2>/dev/null | grep -E 'Status|Banned|Total' || echo -e "  ${YELLOW}SSH 监狱未激活${NC}"
+echo -e "\n  ${GREEN}1.${NC} 重新配置 SSH 防护\n  ${GREEN}2.${NC} 查看封禁列表\n  ${GREEN}0.${NC} 返回"
+read -r -p "> 请选择: " fb_opt
+case "${fb_opt// /}" in
+1)
+    local FB_SSH_PORT
+    FB_SSH_PORT=$(grep -E "^Port " /etc/ssh/sshd_config 2>/dev/null | awk '{print $2}' | head -1)
+    [ -z "$FB_SSH_PORT" ] && FB_SSH_PORT=22
+    cat > /etc/fail2ban/jail.local << FBEOL
+[DEFAULT]
+bantime = 3600
+findtime = 600
+maxretry = 5
 
+[sshd]
+enabled = true
+port = ${FB_SSH_PORT}
+backend = ${FB_BACKEND}
+${FB_LOG:+logpath = ${FB_LOG}}
+maxretry = 3
+bantime = 86400
+FBEOL
+    _svc_restart fail2ban >/dev/null 2>&1
+    echo -e "\n${GREEN}[成功] SSH 防护已重新配置 (端口: ${FB_SSH_PORT})${NC}"
+    pause_for_enter; return ;;
+2) fail2ban-client status sshd 2>/dev/null && fail2ban-client get sshd banned 2>/dev/null; pause_for_enter; return ;;
+*) return ;;
+esac
+fi
+if ! confirm_action "安装并配置 Fail2Ban (SSH 暴力破解防护)"; then pause_for_enter; return; fi
+install_dependencies
+echo -e "\n${CYAN}>>> 正在安装 Fail2Ban...${NC}"
+if command -v apt &>/dev/null; then DEBIAN_FRONTEND=noninteractive apt-get install -y fail2ban >/dev/null 2>&1
+elif command -v dnf &>/dev/null; then dnf install -y fail2ban >/dev/null 2>&1
+elif command -v yum &>/dev/null; then yum install -y fail2ban >/dev/null 2>&1
+elif command -v apk &>/dev/null; then apk add fail2ban >/dev/null 2>&1
+elif command -v pacman &>/dev/null; then pacman -S --noconfirm fail2ban >/dev/null 2>&1
+elif command -v zypper &>/dev/null; then zypper install -y fail2ban >/dev/null 2>&1
+else echo -e "${RED}[错误] 未识别的包管理器。${NC}"; pause_for_enter; return; fi
+if ! command -v fail2ban-client &>/dev/null; then echo -e "${RED}[错误] 安装失败。${NC}"; pause_for_enter; return; fi
+local SSH_PORT
+SSH_PORT=$(grep -E "^Port " /etc/ssh/sshd_config 2>/dev/null | awk '{print $2}' | head -1)
+[ -z "$SSH_PORT" ] && SSH_PORT=22
+cat > /etc/fail2ban/jail.local << FBEOL
+[DEFAULT]
+bantime = 3600
+findtime = 600
+maxretry = 5
+
+[sshd]
+enabled = true
+port = ${SSH_PORT}
+backend = ${FB_BACKEND}
+${FB_LOG:+logpath = ${FB_LOG}}
+maxretry = 3
+bantime = 86400
+FBEOL
+_svc_restart fail2ban >/dev/null 2>&1 && _svc_enable fail2ban >/dev/null 2>&1
+if fail2ban-client status sshd >/dev/null 2>&1; then
+echo -e "\n${GREEN}[成功] Fail2Ban 已配置完成！${NC}"
+echo -e "  ${YELLOW}规则: SSH 端口 ${SSH_PORT}，最大 3 次失败 → 封禁 24 小时${NC}"
+else
+echo -e "\n${RED}[错误] Fail2Ban 启动失败，请检查日志: journalctl -u fail2ban${NC}"
+fi
+pause_for_enter
+}
 
 apply_tuning() {
 while true; do
@@ -2454,9 +2836,15 @@ clear_screen; print_divider
 print_center "[ 节点状态、分享与配置备份管理 ]" "$CYAN"
 install_dependencies
 echo -e "${CYAN}--- 服务端底层配置状态 ---${NC}"
-_ensure_node_meta_file "$SING_BOX_META_FILE"
-if jq -e 'length > 0' "$SING_BOX_META_FILE" >/dev/null 2>&1; then
-  jq -r '.[] | "【Sing-box】 端口: \(.port) | 协议: \(.protocol) | 文件: \(.file)"' "$SING_BOX_META_FILE" 2>/dev/null || echo -e "${YELLOW}Sing-box 节点索引解析失败。${NC}"
+_ensure_node_meta_file "$XRAY_META_FILE"
+_ensure_node_meta_file "$SINGBOX_META_FILE"
+if jq -e 'length > 0' "$XRAY_META_FILE" >/dev/null 2>&1; then
+  jq -r '.[] | "【Xray】 端口: \(.port) | 协议: \(.protocol) | 文件: \(.file)"' "$XRAY_META_FILE" 2>/dev/null || echo -e "${YELLOW}Xray 节点索引解析失败。${NC}"
+else
+  echo -e "${YELLOW}未检测到 Xray 节点配置。${NC}"
+fi
+if jq -e 'length > 0' "$SINGBOX_META_FILE" >/dev/null 2>&1; then
+  jq -r '.[] | "【Sing-box】 端口: \(.port) | 协议: \(.protocol) | 文件: \(.file)"' "$SINGBOX_META_FILE" 2>/dev/null || echo -e "${YELLOW}Sing-box 节点索引解析失败。${NC}"
 else
   echo -e "${YELLOW}未检测到 Sing-box 节点配置。${NC}"
 fi
@@ -2495,9 +2883,12 @@ local ts
 ts=$(date +"%Y%m%d_%H%M%S")
 local bk_path="${BACKUP_DIR}/node_backup_${ts}"
 mkdir -p "$bk_path"
-[ -f "$SING_BOX_CONFIG_FILE" ] && cp "$SING_BOX_CONFIG_FILE" "$bk_path/sing_box_config.json"
-[ -d "$SING_BOX_NODES_DIR" ] && cp -r "$SING_BOX_NODES_DIR" "$bk_path/sing_box_nodes.d"
-[ -f "$SING_BOX_META_FILE" ] && cp "$SING_BOX_META_FILE" "$bk_path/sing_box_nodes_meta.json"
+[ -f "$XRAY_CONFIG_FILE" ] && cp "$XRAY_CONFIG_FILE" "$bk_path/xray_config.json"
+[ -f "$SINGBOX_CONFIG_FILE" ] && cp "$SINGBOX_CONFIG_FILE" "$bk_path/singbox_config.json"
+[ -d "$XRAY_NODES_DIR" ] && cp -r "$XRAY_NODES_DIR" "$bk_path/xray_nodes.d"
+[ -d "$SINGBOX_NODES_DIR" ] && cp -r "$SINGBOX_NODES_DIR" "$bk_path/singbox_nodes.d"
+[ -f "$XRAY_META_FILE" ] && cp "$XRAY_META_FILE" "$bk_path/xray_nodes_meta.json"
+[ -f "$SINGBOX_META_FILE" ] && cp "$SINGBOX_META_FILE" "$bk_path/singbox_nodes_meta.json"
 [ -f "$NODE_RECORD_FILE" ] && cp "$NODE_RECORD_FILE" "$bk_path/vpsbox_nodes.txt"
 echo -e "\n${GREEN}[成功] 节点配置已成功备份至: $bk_path ${NC}"; pause_for_enter
 elif [[ "$vn_opt" =~ ^[rR]$ ]]; then
@@ -2513,15 +2904,36 @@ if ! confirm_action "还原此备份 (当前配置将被覆盖，并尝试热重
 local sel_bk="${n_backups[$((n_res_opt-1))]}"
 local restore_notes=()
 local restore_failed=0
-if [ -d "$sel_bk/sing_box_nodes.d" ]; then
-  rm -rf "$SING_BOX_NODES_DIR" && cp -r "$sel_bk/sing_box_nodes.d" "$SING_BOX_NODES_DIR"
+if [ -d "$sel_bk/xray_nodes.d" ]; then
+  rm -rf "$XRAY_NODES_DIR" && cp -r "$sel_bk/xray_nodes.d" "$XRAY_NODES_DIR"
 fi
-if [ -f "$sel_bk/sing_box_nodes_meta.json" ]; then
-  cp "$sel_bk/sing_box_nodes_meta.json" "$SING_BOX_META_FILE"
+if [ -d "$sel_bk/singbox_nodes.d" ]; then
+  rm -rf "$SINGBOX_NODES_DIR" && cp -r "$sel_bk/singbox_nodes.d" "$SINGBOX_NODES_DIR"
 fi
-[ -f "$sel_bk/sing_box_config.json" ] && cp "$sel_bk/sing_box_config.json" "$SING_BOX_CONFIG_FILE"
+if [ -f "$sel_bk/xray_nodes_meta.json" ]; then
+  cp "$sel_bk/xray_nodes_meta.json" "$XRAY_META_FILE"
+fi
+if [ -f "$sel_bk/singbox_nodes_meta.json" ]; then
+  cp "$sel_bk/singbox_nodes_meta.json" "$SINGBOX_META_FILE"
+fi
+[ -f "$sel_bk/xray_config.json" ] && cp "$sel_bk/xray_config.json" "$XRAY_CONFIG_FILE"
+[ -f "$sel_bk/singbox_config.json" ] && cp "$sel_bk/singbox_config.json" "$SINGBOX_CONFIG_FILE"
 
-if [ -d "$SING_BOX_NODES_DIR" ] || [ -f "$SING_BOX_CONFIG_FILE" ]; then
+if [ -d "$XRAY_NODES_DIR" ] || [ -f "$XRAY_CONFIG_FILE" ]; then
+  if rebuild_core_config "Xray" >/dev/null 2>&1; then
+    if _reload_core_without_disconnect "Xray" >/dev/null 2>&1; then
+      restore_notes+=("Xray: 已恢复并热重载成功")
+    else
+      restore_notes+=("Xray: 配置已恢复，但热重载失败")
+      restore_failed=1
+    fi
+  else
+    restore_notes+=("Xray: 配置重建失败")
+    restore_failed=1
+  fi
+fi
+
+if [ -d "$SINGBOX_NODES_DIR" ] || [ -f "$SINGBOX_CONFIG_FILE" ]; then
   if rebuild_core_config "Sing-box" >/dev/null 2>&1; then
     if _reload_core_without_disconnect "Sing-box" >/dev/null 2>&1; then
       restore_notes+=("Sing-box: 已恢复并热重载成功")
@@ -2560,10 +2972,16 @@ clear_screen; print_divider
 print_center "[ 删除指定的已部署节点 ]" "$CYAN"
 echo -e "正在扫描当前已部署的节点...\n"
 local nodes_found=0
-_ensure_node_meta_file "$SING_BOX_META_FILE"
-if jq -e 'length > 0' "$SING_BOX_META_FILE" >/dev/null 2>&1; then
+_ensure_node_meta_file "$XRAY_META_FILE"
+_ensure_node_meta_file "$SINGBOX_META_FILE"
+if jq -e 'length > 0' "$XRAY_META_FILE" >/dev/null 2>&1; then
+echo -e "${CYAN}【Xray 节点】${NC}"
+jq -r '.[] | "  - 端口: \(.port) | 协议: \(.protocol) | 文件: \(.file)"' "$XRAY_META_FILE" 2>/dev/null
+nodes_found=1
+fi
+if jq -e 'length > 0' "$SINGBOX_META_FILE" >/dev/null 2>&1; then
 echo -e "\n${CYAN}【Sing-box 节点】${NC}"
-jq -r '.[] | "  - 端口: \(.port) | 协议: \(.protocol) | 文件: \(.file)"' "$SING_BOX_META_FILE" 2>/dev/null
+jq -r '.[] | "  - 端口: \(.port) | 协议: \(.protocol) | 文件: \(.file)"' "$SINGBOX_META_FILE" 2>/dev/null
 nodes_found=1
 fi
 if [ "$nodes_found" -eq 0 ]; then echo -e "${YELLOW}未检测到任何已部署的节点，无需删除。${NC}"; pause_for_enter; return; fi
@@ -2574,7 +2992,8 @@ del_port="${del_port// /}"
 if [ "$del_port" == "0" ]; then return; fi
 if [ -z "$del_port" ] || ! [[ "$del_port" =~ ^[0-9]+$ ]]; then echo -e "${RED}[错误] 端口号必须是有效的纯数字！请重新输入。${NC}"; continue; fi
 local core_for_port=""
-if jq -e --argjson port "$del_port" '.[] | select(.port == $port)' "$SING_BOX_META_FILE" >/dev/null 2>&1; then core_for_port="Sing-box"; fi
+if jq -e --argjson port "$del_port" '.[] | select(.port == $port)' "$XRAY_META_FILE" >/dev/null 2>&1; then core_for_port="Xray"; fi
+if jq -e --argjson port "$del_port" '.[] | select(.port == $port)' "$SINGBOX_META_FILE" >/dev/null 2>&1; then core_for_port="Sing-box"; fi
 if [ -z "$core_for_port" ]; then echo -e "${RED}[错误] 当前部署中未找到端口为 $del_port 的节点，请检查！${NC}"; continue; fi
 break
 done
@@ -2592,14 +3011,31 @@ append_inbound() {
 local NEW_INBOUND=$2; local TARGET_PORT=$3; local CORE_NAME=$4; local LABEL=$5; local PROTOCOL_NAME=$6; local LINK=$7
 echo -e "${YELLOW}[系统] 正在写入独立节点片段，完成后约 30 秒生效 ${CORE_NAME}...${NC}"
 if persist_node_runtime "$CORE_NAME" "$TARGET_PORT" "${LABEL:-Node}" "${PROTOCOL_NAME:-Node}" "$LINK" "$NEW_INBOUND"; then
-    echo -e "${GREEN}  ✓ 节点片段写入成功，新节点约 30 秒后生效${NC} ${CORE_NAME}"
+    echo -e "${GREEN}  ✓ 节点片段写入成功，新节点约 30 秒后生效${NC}"
     return 0
 fi
 echo -e "${RED}[错误] 节点片段写入或延迟重启安排失败，已取消本次变更。${NC}"
 return 1
 }
 
-
+select_core() {
+    while true; do
+        echo "" >&2
+        echo "  ┌─────────────────────────────┐" >&2
+        echo "  │      选择运行内核:          │" >&2
+        echo "  │  1) Xray-core               │" >&2
+        echo "  │  2) Sing-box                │" >&2
+        echo "  └─────────────────────────────┘" >&2
+        read -r -p "> 请输入 [1-2, 默认 1, 0 取消]: " core_choice
+        core_choice="${core_choice// /}"
+        if [ "$core_choice" == "0" ]; then return 1; fi
+        [ -z "$core_choice" ] && core_choice=1
+        if [[ "$core_choice" == "1" || "$core_choice" == "2" ]]; then
+            echo "$core_choice"
+            return 0
+        fi
+    done
+}
 
 # 统一输出节点部署结果 (修改版：先输出并保存记录，防止后续断网导致信息丢失)
 output_node_result() {
@@ -2634,6 +3070,7 @@ if ! [[ "$PORT" =~ ^[0-9]+$ ]] || [ "$PORT" -lt 1 ] || [ "$PORT" -gt 65535 ]; th
 if ss -tulpn | grep -qE ":${PORT}[[:space:]]|:${PORT}$"; then echo -e "${RED}[错误] 端口 $PORT 已被占用！${NC}"; continue; fi
 break
 done
+core_choice=$(select_core) || return
 echo -e "\n  ${GREEN}1.${NC} gateway.icloud.com (苹果官网)\n  ${GREEN}2.${NC} www.microsoft.com (微软官网)"
 read -r -p "> 选择伪装 SNI [输入 1-2 选择，或直接输入自定义域名, 默认 1, 0 取消]: " sni_choice
 sni_choice="${sni_choice// /}"
@@ -2647,11 +3084,21 @@ if [ "$SERVER_IPV4" == "未分配" ] && [ "$SERVER_IPV6" != "未分配" ]; then
     echo -e "${YELLOW}[提示] IPv4 未分配，自动使用 IPv6: [${SERVER_IPV6}]${NC}"
     LINK_IP="[${SERVER_IPV6}]"
 fi
+if [ "$core_choice" == "1" ]; then
+CORE_NAME="Xray"
+if ! command -v xray &> /dev/null; then echo -e "${YELLOW}   首次部署需下载 Xray 核心，请耐心等待...${NC}"; _run_remote_bash https://github.com/XTLS/Xray-install/raw/main/install-release.sh install > /dev/null 2>&1; hash -r; command -v xray &>/dev/null || { echo -e "
+${RED}[错误] Xray 核心下载失败，请检查网络连接。${NC}"; pause_for_enter; return; }; fi
+KEYS=$(xray x25519)
+PRI=$(echo "$KEYS" | awk -F': ' '/PrivateKey/{print $2}')
+PUB=$(echo "$KEYS" | awk -F': ' '/Password|PublicKey/{print $2}' | head -n1)
+NEW_INBOUND='{"listen":"0.0.0.0","port":'$PORT',"protocol":"vless","settings":{"clients":[{"id":"'$UUID'","flow":"xtls-rprx-vision"}],"decryption":"none"},"streamSettings":{"network":"tcp","security":"reality","realitySettings":{"show":false,"dest":"'$SNI_DOMAIN':443","serverNames":["'$SNI_DOMAIN'"],"privateKey":"'$PRI'","shortIds":["'$SHORT_ID'"]}}}'
+else
 CORE_NAME="Sing-box"
 if ! command -v sing-box &> /dev/null; then echo -e "${YELLOW}   首次部署需下载 Sing-box 核心，请耐心等待...${NC}"; _run_remote_bash https://sing-box.app/install.sh > /dev/null 2>&1; hash -r; command -v sing-box &>/dev/null || { echo -e "\n${RED}[错误] Sing-box 核心下载失败，请检查网络连接。${NC}"; pause_for_enter; return; }; fi
 SB_BIN=$(command -v sing-box || echo "/usr/local/bin/sing-box"); KEYS=$("$SB_BIN" generate reality-keypair)
 PRI=$(echo "$KEYS" | awk -F'[: ]+' '/Private/{print $NF}'); PUB=$(echo "$KEYS" | awk -F'[: ]+' '/Public/{print $NF}')
 NEW_INBOUND='{"type":"vless","listen":"0.0.0.0","listen_port":'$PORT',"users":[{"uuid":"'$UUID'","flow":"xtls-rprx-vision"}],"tls":{"enabled":true,"server_name":"'$SNI_DOMAIN'","reality":{"enabled":true,"handshake":{"server":"'$SNI_DOMAIN'","server_port":443},"private_key":"'$PRI'","short_id":["'$SHORT_ID'"]}}}'
+fi
 
 LINK="vless://${UUID}@${LINK_IP}:${PORT}?encryption=none&security=reality&sni=${SNI_DOMAIN}&fp=chrome&pbk=${PUB}&sid=${SHORT_ID}&flow=xtls-rprx-vision#R"
 
@@ -2852,6 +3299,7 @@ if ! [[ "$WS_PORT" =~ ^[0-9]+$ ]] || [ "$WS_PORT" -lt 1 ] || [ "$WS_PORT" -gt 65
 if ss -tulpn | grep -qE ":${WS_PORT}[[:space:]]|:${WS_PORT}$"; then echo -e "${RED}端口 $WS_PORT 已被占用！${NC}"; continue; fi
 break
 done
+core_choice=$(select_core) || return
 echo -e "\n${YELLOW}>>> 如何获取 Cloudflare API Token？${NC}"
 echo -e "  ${GREEN}1.${NC} 登录 Cloudflare 控制台: https://dash.cloudflare.com"
 echo -e "  ${GREEN}2.${NC} 点击右上角头像 →「我的个人资料」→「API 令牌」"
@@ -2870,9 +3318,15 @@ cert_mode=1
 if ! confirm_action "开始部署 WS+TLS 节点并申请证书"; then pause_for_enter; return; fi
 acquire_cert "$DOMAIN" "$cert_mode" "$CF_Token" "" || { pause_for_enter; return; }
 UUID=$(cat /proc/sys/kernel/random/uuid); WSPATH="/$(openssl rand -hex 4)"
+if [ "$core_choice" == "1" ]; then
+CORE_NAME="Xray"
+if ! command -v xray &> /dev/null; then echo -e "${YELLOW}   首次部署需下载 Xray 核心，请耐心等待...${NC}"; _run_remote_bash https://github.com/XTLS/Xray-install/raw/main/install-release.sh install > /dev/null 2>&1; hash -r; command -v xray &>/dev/null || { echo -e "\n${RED}[错误] Xray 核心下载失败，请检查网络连接。${NC}"; pause_for_enter; return; }; fi
+NEW_INBOUND='{"port":'$WS_PORT',"protocol":"vless","settings":{"clients":[{"id":"'$UUID'"}],"decryption":"none"},"streamSettings":{"network":"ws","security":"tls","tlsSettings":{"certificates":[{"certificateFile":"'$CERT_DIR'/fullchain.pem","keyFile":"'$CERT_DIR'/privkey.pem"}]},"wsSettings":{"path":"'$WSPATH'"}}}'
+else
 CORE_NAME="Sing-box"
 if ! command -v sing-box &> /dev/null; then echo -e "${YELLOW}   首次部署需下载 Sing-box 核心，请耐心等待...${NC}"; _run_remote_bash https://sing-box.app/install.sh > /dev/null 2>&1; hash -r; command -v sing-box &>/dev/null || { echo -e "\n${RED}[错误] Sing-box 核心下载失败，请检查网络连接。${NC}"; pause_for_enter; return; }; fi
 NEW_INBOUND='{"type":"vless","listen":"0.0.0.0","listen_port":'$WS_PORT',"users":[{"uuid":"'$UUID'"}],"tls":{"enabled":true,"server_name":"'$DOMAIN'","certificate_path":"'$CERT_DIR'/fullchain.pem","key_path":"'$CERT_DIR'/privkey.pem"},"transport":{"type":"ws","path":"'$WSPATH'"}}'
+fi
 
 LINK="vless://${UUID}@${DOMAIN}:${WS_PORT}?encryption=none&security=tls&sni=${DOMAIN}&alpn=h2%2Chttp%2F1.1&type=ws&host=${DOMAIN}&path=${WSPATH}#WS"
 
@@ -2910,6 +3364,8 @@ if _port_is_listening "$SS_PORT"; then echo -e "${RED}[错误] 端口 $SS_PORT �
 break
 done
 
+core_choice=$(select_core) || return
+
 echo -e "\n${CYAN}>>> 加密方式选择${NC}"
 echo -e "  ${GREEN}1.${NC} aes-256-gcm ${CYAN}[推荐/兼容好]${NC}"
 echo -e "  ${GREEN}2.${NC} chacha20-ietf-poly1305"
@@ -2932,14 +3388,22 @@ if ! confirm_action "开始部署 Shadowsocks 节点"; then pause_for_enter; ret
 install_dependencies
 LINK_IP="$SERVER_IP"
 if [ "$SERVER_IPV4" == "未分配" ] && [ "$SERVER_IPV6" != "未分配" ]; then LINK_IP="[${SERVER_IPV6}]"; fi
+if [ "$core_choice" == "1" ]; then
+CORE_NAME="Xray"
+if ! command -v xray &> /dev/null; then echo -e "${YELLOW}   首次部署需下载 Xray 核心，请耐心等待...${NC}"; _run_remote_bash https://github.com/XTLS/Xray-install/raw/main/install-release.sh install > /dev/null 2>&1; hash -r; command -v xray &>/dev/null || { echo -e "\n${RED}[错误] Xray 核心下载失败，请检查网络连接。${NC}"; pause_for_enter; return; }; fi
+NEW_INBOUND='{"listen":"0.0.0.0","port":'$SS_PORT',"protocol":"shadowsocks","settings":{"network":"tcp,udp","method":"'$SS_METHOD'","password":"'$SS_PASS'","level":0,"email":"vpsbox@ss"}}'
+else
 CORE_NAME="Sing-box"
 if ! command -v sing-box &> /dev/null; then echo -e "${YELLOW}   首次部署需下载 Sing-box 核心，请耐心等待...${NC}"; _run_remote_bash https://sing-box.app/install.sh > /dev/null 2>&1; hash -r; command -v sing-box &>/dev/null || { echo -e "\n${RED}[错误] Sing-box 核心下载失败，请检查网络连接。${NC}"; pause_for_enter; return; }; fi
 NEW_INBOUND='{"type":"shadowsocks","listen":"0.0.0.0","listen_port":'$SS_PORT',"network":"tcp,udp","method":"'$SS_METHOD'","password":"'$SS_PASS'"}'
+fi
 
 SS_USERINFO=$(printf '%s:%s' "$SS_METHOD" "$SS_PASS" | base64 -w0 2>/dev/null || printf '%s:%s' "$SS_METHOD" "$SS_PASS" | base64 | tr -d '\n')
 LINK="ss://${SS_USERINFO}@${LINK_IP}:${SS_PORT}#SS-${SS_PORT}"
 
 if append_inbound "$(_config_file_for_core "$CORE_NAME")" "$NEW_INBOUND" "$SS_PORT" "$CORE_NAME" "Shadowsocks" "shadowsocks" "$LINK"; then
+    _ufw_allow_if_active "$SS_PORT" tcp
+    _ufw_allow_if_active "$SS_PORT" udp
     output_node_result "$LINK" "Shadowsocks" "$SS_PORT" "$CORE_NAME" "shadowsocks"
     echo -e "\n${GREEN}>>> Shadowsocks 节点已生成，新节点约 30 秒后生效。${NC}"
     echo -e "${YELLOW}>>> 如使用云厂商安全组，请同时放行 ${SS_PORT}/tcp 与 ${SS_PORT}/udp。${NC}"
@@ -2968,7 +3432,11 @@ _setup_hy2_port_hopping() {
     iptables-save > /etc/iptables/rules.v4 2>/dev/null || true
   fi
 
-
+  _ufw_allow_if_active "$target_port" udp
+  if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -qi "Status: active"; then
+    ufw allow "${start}:${end}/udp" >/dev/null 2>&1 || true
+    ufw reload >/dev/null 2>&1 || true
+  fi
   echo -e "${GREEN}  ✓ HY2 UDP 端口跳跃已配置: ${start}-${end} -> ${target_port}${NC}"
   echo -e "${YELLOW}  提示：若系统未安装持久化组件，重启后可能需要重新配置端口跳跃。${NC}"
 }
@@ -3018,6 +3486,7 @@ if [ "$hop_choice" = "2" ]; then
     echo -e "${RED}[错误] 范围格式无效，请输入类似 20000-20100。${NC}"
   done
 fi
+core_choice=$(select_core) || return
 echo -e "\n${CYAN}>>> 证书申请模式选择${NC}"
 echo -e "  ${GREEN}1.${NC} 【API模式】使用 Cloudflare API 申请\n  ${GREEN}2.${NC} 【独立模式】使用常规 80 端口申请"
 while true; do
@@ -3050,14 +3519,22 @@ done
 if ! confirm_action "开始部署 Hysteria2 节点并申请证书"; then pause_for_enter; return; fi
 acquire_cert "$DOMAIN" "$cert_mode" "$CF_Token" "" || { pause_for_enter; return; }
 HY2_PASS=$(openssl rand -hex 8)
+if [ "$core_choice" == "1" ]; then
+CORE_NAME="Xray"
+if ! command -v xray &> /dev/null; then echo -e "${YELLOW}   首次部署需下载 Xray 核心，请耐心等待...${NC}"; _run_remote_bash https://github.com/XTLS/Xray-install/raw/main/install-release.sh install > /dev/null 2>&1; hash -r; command -v xray &>/dev/null || { echo -e "
+${RED}[错误] Xray 核心下载失败，请检查网络连接。${NC}"; pause_for_enter; return; }; fi
+NEW_INBOUND='{"listen":"0.0.0.0","port":'$HY2_PORT',"protocol":"hysteria","settings":{"version":2,"clients":[{"auth":"'$HY2_PASS'","level":0,"email":"vpsbox@hy2"}]},"streamSettings":{"network":"hysteria","security":"tls","tlsSettings":{"serverName":"'$DOMAIN'","alpn":["h3"],"certificates":[{"certificateFile":"'$CERT_DIR'/fullchain.pem","keyFile":"'$CERT_DIR'/privkey.pem"}]},"hysteriaSettings":{"version":2}}}'
+else
 CORE_NAME="Sing-box"
 if ! command -v sing-box &> /dev/null; then echo -e "${YELLOW}   首次部署需下载 Sing-box 核心，请耐心等待...${NC}"; _run_remote_bash https://sing-box.app/install.sh > /dev/null 2>&1; hash -r; command -v sing-box &>/dev/null || { echo -e "
 ${RED}[错误] Sing-box 核心下载失败，请检查网络连接。${NC}"; pause_for_enter; return; }; fi
 NEW_INBOUND='{"type":"hysteria2","listen":"0.0.0.0","listen_port":'$HY2_PORT',"users":[{"password":"'$HY2_PASS'"}],"tls":{"enabled":true,"server_name":"'$DOMAIN'","alpn":["h3"],"certificate_path":"'$CERT_DIR'/fullchain.pem","key_path":"'$CERT_DIR'/privkey.pem"}}'
+fi
 
 LINK="hysteria2://${HY2_PASS}@${DOMAIN}:${HY2_PORT}/?sni=${DOMAIN}&alpn=h3&insecure=0#H2"
 
 if append_inbound "$(_config_file_for_core "$CORE_NAME")" "$NEW_INBOUND" "$HY2_PORT" "$CORE_NAME" "Hys2" "hysteria2" "$LINK"; then
+    _ufw_allow_if_active "$HY2_PORT" udp
     if [ "$HY2_HOP_ENABLED" -eq 1 ]; then
         _setup_hy2_port_hopping "$HY2_PORT" "$HY2_HOP_RANGE"
     fi
@@ -3285,6 +3762,7 @@ install_dependencies
 local ok=1 p before_mode state_file
 for p in $protos; do
   if _apply_port_forward "$listen_port" "$p" "$target_host" "$target_port"; then
+    _ufw_allow_if_active "$listen_port" "$p"
     state_file=$(_forward_state_file "$listen_port" "$p")
     unset MODE
     . "$state_file" 2>/dev/null || true
@@ -3348,7 +3826,107 @@ case "$pf_opt" in
 esac
 done
 }
-
+manage_ufw() {
+while true; do
+clear_screen; print_divider
+print_center "[ UFW 防火墙端口管理 ]" "$CYAN"
+if ! command -v ufw &> /dev/null; then
+echo -e "${YELLOW}[系统] 正在自动安装 UFW 防火墙...${NC}"
+if command -v apt &>/dev/null; then DEBIAN_FRONTEND=noninteractive apt-get install -y ufw >/dev/null 2>&1
+elif command -v dnf &>/dev/null; then dnf install -y ufw >/dev/null 2>&1
+elif command -v yum &>/dev/null; then yum install -y ufw >/dev/null 2>&1
+elif command -v apk &>/dev/null; then apk add ufw >/dev/null 2>&1
+elif command -v pacman &>/dev/null; then pacman -S --noconfirm ufw >/dev/null 2>&1
+elif command -v zypper &>/dev/null; then zypper install -y ufw >/dev/null 2>&1
+fi || echo -e "${RED}[错误] UFW 安装失败。${NC}"
+_svc_stop netfilter-persistent 2>/dev/null
+while iptables -L INPUT -n --line-numbers 2>/dev/null | grep -q "REJECT"; do
+    local N
+    N=$(iptables -L INPUT -n --line-numbers 2>/dev/null | grep "REJECT" | head -1 | awk '{print $1}')
+    iptables -D INPUT "$N" 2>/dev/null
+done
+fi
+install_dependencies
+echo -e "  ${GREEN}1.${NC} 查看当前防火墙状态与已放行端口\n  ${GREEN}2.${NC} 放行指定新端口 (TCP/UDP)\n  ${GREEN}3.${NC} 删除某个端口规则\n  ${GREEN}4.${NC} 开启防火墙\n  ${GREEN}5.${NC} 彻底关闭防火墙\n  ${GREEN}6.${NC} 一键仅放行正在使用的端口 (关闭所有未占用)\n  ${GREEN}7.${NC} 一键打开所有入站端口\n  ${GREEN}0.${NC} 返回主菜单"
+echo ""
+read -r -p "> 请选择操作 [0-7]: " ufw_opt
+ufw_opt="${ufw_opt// /}"
+case $ufw_opt in
+1) echo -e "\n${CYAN}>>> 防火墙状态：${NC}"; ufw status numbered || echo -e "${RED}[错误] 读取状态失败。${NC}"; pause_for_enter ;;
+2)
+read -r -p "> 请输入要放行的端口号: " port
+port="${port// /}"
+if [[ "$port" =~ ^[0-9]+$ ]] && [ "$port" -ge 1 ] && [ "$port" -le 65535 ]; then ufw allow "$port"; echo -e "${GREEN}[成功] 端口 $port 已成功添加放行规则！${NC}"; ufw reload > /dev/null 2>&1; else echo -e "${RED}[错误] 端口号输入无效！${NC}"; fi
+pause_for_enter ;;
+3)
+echo -e "\n${CYAN}>>> 当前规则列表：${NC}"; ufw status numbered; echo ""
+read -r -p "> 请输入要删除的【规则编号】: " rule_num
+rule_num="${rule_num// /}"
+if [[ "$rule_num" =~ ^[0-9]+$ ]]; then
+  if ufw --force delete "$rule_num"; then
+    echo -e "${GREEN}[成功] 规则 $rule_num 已删除。${NC}"
+  else
+    echo -e "${RED}[错误] 删除规则失败。${NC}"
+  fi
+fi
+pause_for_enter ;;
+4)
+if ! confirm_action "开启防火墙并默认拦截外部访问 (系统将自动防呆放行 SSH)"; then continue; fi
+CURRENT_SSH_PORT=$(ss -tlnp | grep -w sshd | awk '{print $4}' | awk -F':' '{print $NF}' | head -n 1)
+[ -z "$CURRENT_SSH_PORT" ] && CURRENT_SSH_PORT=$(grep -E "^Port " /etc/ssh/sshd_config | awk '{print $2}' | head -n 1)
+[ -z "$CURRENT_SSH_PORT" ] && CURRENT_SSH_PORT=22
+echo -e "\n${CYAN}>>> 检测到当前 SSH 登录端口为: ${CURRENT_SSH_PORT}${NC}"
+ufw default deny incoming > /dev/null 2>&1; ufw default allow outgoing > /dev/null 2>&1
+ufw allow "$CURRENT_SSH_PORT"/tcp > /dev/null 2>&1
+ufw --force enable || { echo -e "\n${RED}[错误] 开启防火墙失败。${NC}"; pause_for_enter; continue; }
+echo -e "\n${GREEN}[成功] 防火墙已成功开启！当前 SSH 端口 $CURRENT_SSH_PORT 已安全放行。${NC}"; pause_for_enter ;;
+5)
+if ! confirm_action "彻底关闭防火墙" "n"; then continue; fi
+ufw disable || { echo -e "${RED}[错误] 关闭防火墙失败。${NC}"; pause_for_enter; continue; }
+echo -e "${GREEN}[成功] 防火墙已完全关闭！${NC}"; pause_for_enter ;;
+6)
+if ! confirm_action "⚠️ 重置所有规则，仅放行正在使用的端口 (之前手动加的规则会丢失)"; then continue; fi
+SSHPORT=$(ss -tlnp 2>/dev/null | grep -w sshd | awk '{print $4}' | awk -F: '{print $NF}' | head -1)
+[ -z "$SSHPORT" ] && SSHPORT=$(grep -E "^Port " /etc/ssh/sshd_config 2>/dev/null | awk '{print $2}' | head -1)
+[ -z "$SSHPORT" ] && SSHPORT=22
+echo -e "\n${CYAN}>>> 检测到 SSH 端口: ${SSHPORT}${NC}"
+ufw --force reset > /dev/null 2>&1
+ufw default deny incoming > /dev/null 2>&1
+ufw default allow outgoing > /dev/null 2>&1
+ufw allow "$SSHPORT"/tcp > /dev/null 2>&1
+echo -e "${GREEN}  ✓ 放行 SSH: ${SSHPORT}/tcp${NC}"
+USED_LISTENS=$(_collect_public_listen_entries)
+while read -r proto p; do
+  [ -z "$proto" ] && continue
+  [ -z "$p" ] && continue
+  [ "$p" = "$SSHPORT" ] && continue
+  case "$proto" in
+    tcp)
+      ufw allow "$p/tcp" > /dev/null 2>&1 && echo -e "${GREEN}  ✓ 放行 TCP 端口: ${p}${NC}" || echo -e "${YELLOW}  - TCP 端口 ${p} 放行失败${NC}"
+      ;;
+    udp)
+      ufw allow "$p/udp" > /dev/null 2>&1 && echo -e "${GREEN}  ✓ 放行 UDP 端口: ${p}${NC}" || echo -e "${YELLOW}  - UDP 端口 ${p} 放行失败${NC}"
+      ;;
+  esac
+done <<< "$USED_LISTENS"
+ufw --force enable > /dev/null 2>&1
+ufw reload > /dev/null 2>&1
+echo -e "\n${GREEN}[成功] 防火墙已重新配置！仅放行正在使用的端口。${NC}"
+pause_for_enter ;;
+7)
+if ! confirm_action "打开所有入站端口 (⚠️ 安全风险)"; then continue; fi
+ufw --force reset > /dev/null 2>&1
+ufw default allow incoming > /dev/null 2>&1
+ufw default allow outgoing > /dev/null 2>&1
+ufw --force enable > /dev/null 2>&1
+ufw reload > /dev/null 2>&1
+echo -e "\n${GREEN}[成功] 所有入站端口已全部打开！${NC}"
+pause_for_enter ;;
+0) break ;;
+*) echo -e "\n${RED}输入无效！${NC}"; sleep 1 ;;
+esac
+done
+}
 
 tools_manager() {
 local TOOL_LIST=(
@@ -3943,21 +4521,22 @@ menu_pair 7 "Swap 管理" 8 "DNS 优化"
 menu_pair 9 "SSH 端口" 10 "SSH 密钥"
 
 echo ""
-echo -e "  ${CYAN}网络与服务${NC}"
+echo -e "  ${CYAN}网络与安全${NC}"
 menu_pair 11 "TCP 调优" 12 "BBR 管理"
 menu_pair 13 "流媒体检测" 14 "Docker"
-menu_pair 15 "WARP 解锁" 16 "节点管理"
+menu_pair 15 "Fail2Ban" 16 "WARP 解锁"
+menu_pair 17 "UFW 防火墙" 18 "节点管理"
 
 echo ""
 echo -e "  ${CYAN}更多功能${NC}"
-menu_pair 17 "磁盘分区" 18 "定时任务"
-menu_pair 19 "基础工具箱" 20 "脚本管理"
+menu_pair 19 "磁盘分区" 20 "定时任务"
+menu_pair 21 "基础工具箱" 22 "脚本管理"
 
 echo ""
 print_divider
 echo -e "  ${GREEN} 0${NC}. 退出"
 echo ""
-_read_menu_choice OPTION "> 请选择 [0-20]: "
+_read_menu_choice OPTION "> 请选择 [0-22]: "
 [ -z "$OPTION" ] && continue
 case $OPTION in
  1) system_overview ;;
@@ -3974,12 +4553,14 @@ case $OPTION in
 12) manage_bbr ;;
 13) check_media_unlock ;;
 14) docker_install ;;
-15) install_warp ;;
-16) menu_nodes ;;
-17) disk_manager ;;
-18) crontab_manager ;;
-19) tools_manager ;;
-20) manage_script ;;
+15) fail2ban_install ;;
+16) install_warp ;;
+17) manage_ufw ;;
+18) menu_nodes ;;
+19) disk_manager ;;
+20) crontab_manager ;;
+21) tools_manager ;;
+22) manage_script ;;
  0) echo -e "\n${GREEN}[感谢使用] 正在退出...${NC}\n"; exit 0 ;;
  *) echo -e "\n${RED}[提示] 编号不存在！${NC}"; sleep 1 ;;
 esac

@@ -1,0 +1,70 @@
+﻿diff --git a/vpsbox.sh b/vpsbox.sh
+index 9a3168f..d7df161 100644
+--- a/vpsbox.sh
++++ b/vpsbox.sh
+@@ -2237,7 +2237,7 @@ echo -e "  ${CYAN}BBR     :${NC} $(get_bbr_status)"
+ echo ""
+ echo -e "  ${YELLOW}宸查儴缃叉牳蹇冪姸鎬?${NC}"
+ local svc
+-for svc in xray sing-box docker; do
++for svc in sing-box docker; do
+     local s_status
+     if command -v systemctl &>/dev/null && systemctl list-unit-files "${svc}.service" &>/dev/null; then
+         s_status=$(_svc_is_active "$svc" && echo "active" || echo "inactive")
+@@ -2643,37 +2643,27 @@ if ! confirm_action "寮€濮嬮儴缃?Reality 鑺傜偣"; then pause_for_enter; return;
+ install_dependencies
+ UUID=$(cat /proc/sys/kernel/random/uuid); SHORT_ID=$(openssl rand -hex 8)
+ LINK_IP="$SERVER_IP"
+-if [ "$SERVER_IPV4" == "鏈垎閰? ] && [ "$SERVER_IPV6" != "鏈垎閰? ]; then 
+-    echo -e "${YELLOW}[鎻愮ず] IPv4 鏈垎閰嶏紝鑷姩浣跨敤 IPv6: [${SERVER_IPV6}]${NC}"
+-    LINK_IP="[${SERVER_IPV6}]"
+-fi
++if [ "$SERVER_IPV4" == "鏈垎閰? ] && [ "$SERVER_IPV6" != "鎒cho -e "\n${YELLOW}>>> 濡備綍鑾峰彇 Cloudflare API Token锛?{NC}"
++echo -e "  ${GREEN}1.${NC} 鐧诲綍 Cloudflare 鎺у埗鍙? https://dash.cloudflare.com"
++echo -e "  ${GREEN}2.${NC} 鐐瑰嚮鍙充笂瑙掑ご鍍?鈫掋€屾垜鐨勪釜浜鸿祫鏂欍€嶁啋銆孉PI 浠ょ墝銆?
++echo -e "  ${GREEN}3.${NC} 鐐瑰嚮銆屽垱寤轰护鐗屻€嶁啋 閫夋嫨銆岀紪杈戝尯鍩?DNS銆嶆ā鏉?
++echo -e "  ${GREEN}4.${NC} 鏉冮檺閫夈€屽尯鍩?- DNS - 缂栬緫銆嶏紝鍖哄煙閫変綘鐨勫煙鍚嶏紝鍒涘缓鍚庡鍒?Token"
++echo ""
++while true; do
++read -r -s -p "> 璇疯緭鍏ユ偍鐨?Cloudflare API Token (杈撳叆 0 鍙栨秷): " CF_Token
++echo ""
++CF_Token="${CF_Token// /}"
++if [ "$CF_Token" == "0" ]; then return; fi
++if [ -z "$CF_Token" ]; then continue; fi
++export CF_Token="$CF_Token"; break
++done
++cert_mode=1
++if ! confirm_action "寮€濮嬮儴缃?WS+TLS 鑺傜偣骞剁敵璇疯瘉涔?; then pause_for_enter; return; fi
++acquire_cert "$DOMAIN" "$cert_mode" "$CF_Token" "" || { pause_for_enter; return; }
++UUID=$(cat /proc/sys/kernel/random/uuid); WSPATH="/$(openssl rand -hex 4)"
+ CORE_NAME="Sing-box"
+ if ! command -v sing-box &> /dev/null; then echo -e "${YELLOW}   棣栨閮ㄧ讲闇€涓嬭浇 Sing-box 鏍稿績锛岃鑰愬績绛夊緟...${NC}"; _run_remote_bash https://sing-box.app/install.sh > /dev/null 2>&1; hash -r; command -v sing-box &>/dev/null || { echo -e "\n${RED}[閿欒] Sing-box 鏍稿績涓嬭浇澶辫触锛岃妫€鏌ョ綉缁滆繛鎺ャ€?{NC}"; pause_for_enter; return; }; fi
+-SB_BIN=$(command -v sing-box || echo "/usr/local/bin/sing-box"); KEYS=$("$SB_BIN" generate reality-keypair)
+-PRI=$(echo "$KEYS" | awk -F'[: ]+' '/Private/{print $NF}'); PUB=$(echo "$KEYS" | awk -F'[: ]+' '/Public/{print $NF}')
+-NEW_INBOUND='{"type":"vless","listen":"0.0.0.0","listen_port":'$PORT',"users":[{"uuid":"'$UUID'","flow":"xtls-rprx-vision"}],"tls":{"enabled":true,"server_name":"'$SNI_DOMAIN'","reality":{"enabled":true,"handshake":{"server":"'$SNI_DOMAIN'","server_port":443},"private_key":"'$PRI'","short_id":["'$SHORT_ID'"]}}}'
+-
+-LINK="vless://${UUID}@${LINK_IP}:${PORT}?encryption=none&security=reality&sni=${SNI_DOMAIN}&fp=chrome&pbk=${PUB}&sid=${SHORT_ID}&flow=xtls-rprx-vision#R"
+-
+-if append_inbound "$(_config_file_for_core "$CORE_NAME")" "$NEW_INBOUND" "$PORT" "$CORE_NAME" "Reality" "vless-reality" "$LINK"; then
+-    output_node_result "$LINK" "Reality" "$PORT" "$CORE_NAME" "vless-reality"
+-    echo -e "\n${GREEN}>>> 宸查€氳繃鐙珛绔彛閰嶇疆鏂囦欢瀹屾垚鎺ュ叆锛屾柊鑺傜偣绾?30 绉掑悗鐢熸晥銆傛棫杩炴帴涓嶄細鍥犳柊澧炶妭鐐瑰湪閮ㄧ讲涓€旇閲嶅惎銆?{NC}"
+-else
+-    echo -e "\n${RED}[閿欒] 閰嶇疆鏍￠獙澶辫触 鈥?鐢熸垚鐨?JSON 涓嶇鍚堣姹傦紝鏈慨鏀逛换浣曟枃浠躲€?{NC}"
+-fi
+-pause_for_enter
+-}
+-
+-install_anytls_node() {
+-clear_screen; print_divider
+-print_center "[ 閮ㄧ讲 AnyTLS 鑺傜偣 ]" "$CYAN"
+-_ensure_ip
+-echo -e "${YELLOW}>>> 灏忕櫧绉戞櫘锛欰nyTLS 鏄?sing-box 涓撳睘鍗忚銆備娇鐢ㄨ嚜鏈夊煙鍚?+ Let's Encrypt 鐪熻瘉涔︼紝瀵嗙爜璁よ瘉銆?{NC}\n"
+-
+-while true; do
+-read -r -p "> 璇疯緭鍏ュ煙鍚?(杈撳叆 0 鍙栨秷): " DOMAIN
+-DOMAIN="${DOMAIN// /}"
+-if [ "$DOMAIN" == "0" ]; then return; fi
++NEW_INBOUND='{"type":"vless","listen":"0.0.0.0","listen_port":'$WS_PORT',"users":[{"uuid":"'$UUID'"}],"tls":{"enabled":true,"server_name":"'$DOMAIN'","certificate_path":"'$CERT_DIR'/fullchain.pem","key_path":"'$CERT_DIR'/privkey.pem"},"transport":{"type":"ws","path":"'$WSPATH'"}}'
+ if [ -z "$DOMAIN" ]; then continue; fi
+ DOMAIN_IP=$(_domain_resolution_summary "$DOMAIN")
+ break
