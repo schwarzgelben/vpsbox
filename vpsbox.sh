@@ -2,7 +2,7 @@
 # =====================================================================
 # 项目名称: VPS Box (轻量级节点管理与网络优化引擎)
 # 版本: v1.8.9 — 增加快捷中转、HY2 端口跳跃、Shadowsocks 节点
-# 推荐运行方式: bash <(curl -sL https://raw.githubusercontent.com/schwarzgelben/vpsbox/main/vpsbox.sh)
+# 推荐运行方式: bash <(curl -sL https://raw.githubusercontent.com/schwarzgelben/vpsbox/master/vpsbox.sh)
 # =====================================================================
 VPSBOX_VERSION="v1.8.9"
 
@@ -24,7 +24,7 @@ echo -e "\n${GREEN}[VPSBox v${VPSBOX_VERSION#v}]${NC} 正在初始化..."
 BACKUP_DIR="/etc/vpsbox_backups"
 CUSTOM_CONF="/etc/sysctl.d/99-vpsbox-tcp.conf"
 SHORTCUT_PATH="/usr/local/bin/vpsbox"
-SCRIPT_URL="https://raw.githubusercontent.com/schwarzgelben/vpsbox/main/vpsbox.sh"
+SCRIPT_URL="https://raw.githubusercontent.com/schwarzgelben/vpsbox/master/vpsbox.sh"
 NODE_RECORD_FILE="/etc/vpsbox_nodes.txt"
 INSTALL_LOG="/tmp/vpsbox_install.log"
 SING_BOX_CONFIG_FILE="/etc/sing-box/config.json"
@@ -3828,7 +3828,7 @@ clear_screen; print_divider
 print_center "[ VPSBox 脚本管理 ]" "$CYAN"
 local local_ver remote_ver
 local_ver="${VPSBOX_VERSION:-未知}"
-remote_ver=$(curl -sL --connect-timeout 2 --max-time 3 https://raw.githubusercontent.com/schwarzgelben/vpsbox/main/vpsbox.sh 2>/dev/null | grep -oP '^VPSBOX_VERSION="\K[^"]+' | head -1)
+remote_ver=$(curl -sL --connect-timeout 2 --max-time 3 https://raw.githubusercontent.com/schwarzgelben/vpsbox/master/vpsbox.sh 2>/dev/null | grep -oP '^VPSBOX_VERSION="\K[^"]+' | head -1)
 echo -e "  ${CYAN}本地版本:${NC} ${GREEN}${local_ver}${NC}"
 if [ -n "$remote_ver" ]; then
   local _local_cmp _remote_cmp _remote_newer=0 _local_newer=0 _i _r _l
@@ -3861,7 +3861,7 @@ case $ms_opt in
 1)
 if ! confirm_action "从 GitHub 拉取最新版覆盖当前脚本"; then continue; fi
 echo -e "\n${CYAN}>>> 正在下载...${NC}"
-curl -sL --connect-timeout 5 --max-time 30 "https://raw.githubusercontent.com/schwarzgelben/vpsbox/main/vpsbox.sh" -o /tmp/vpsbox_update.sh
+curl -sL --connect-timeout 5 --max-time 30 "https://raw.githubusercontent.com/schwarzgelben/vpsbox/master/vpsbox.sh" -o /tmp/vpsbox_update.sh
 if [ -f /tmp/vpsbox_update.sh ] && grep -q "VPSBox" /tmp/vpsbox_update.sh; then
 mv /tmp/vpsbox_update.sh "$SHORTCUT_PATH"; chmod +x "$SHORTCUT_PATH"
 echo -e "\n${GREEN}[成功] 已更新！${NC}"
