@@ -221,9 +221,10 @@ vpsbox
 
 ## 支持环境
 
-仅支持以下操作系统环境：
+支持以下操作系统环境：
 
-- Debian 13 (Trixie)
+- Debian 12 (Bookworm) / 13 (Trixie)
+- Ubuntu 20.04 / 22.04 / 24.04 LTS
 
 依赖的包管理器与服务管理系统：
 

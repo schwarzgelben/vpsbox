@@ -19,6 +19,13 @@ CYAN='\033[0;36m'
 PURPLE='\033[0;35m'
 NC='\033[0m'
 
+# 高亮/粗体颜色变量
+BOLD_RED='\033[1;31m'
+BOLD_GREEN='\033[1;32m'
+BOLD_YELLOW='\033[1;33m'
+BOLD_CYAN='\033[1;36m'
+BOLD_PURPLE='\033[1;35m'
+
 # 立即输出加载提示，防止 curl|bash 管道模式下长时间静默让用户以为卡死
 echo -e "\n${GREEN}[VPSBox v${VPSBOX_VERSION#v}]${NC} 正在初始化..."
 BACKUP_DIR="/etc/vpsbox_backups"
@@ -50,47 +57,71 @@ _sync_shortcut_from_current() {
     local shortcut_ver=""
     [ -s "$SHORTCUT_PATH" ] && shortcut_ver=$(grep -oP '^VPSBOX_VERSION="\K[^"]+' "$SHORTCUT_PATH" 2>/dev/null | head -1)
     [ "$shortcut_ver" = "$VPSBOX_VERSION" ] && return 0
-    if [ -f "$0" ]; then
+    if [ -f "$0" ] && grep -q "VPSBox" "$0" 2>/dev/null; then
         install -m 755 "$0" "$SHORTCUT_PATH" 2>/dev/null || true
     else
-        curl -fsSL --connect-timeout 5 --max-time 20 "$SCRIPT_URL" -o "$SHORTCUT_PATH" 2>/dev/null && chmod 755 "$SHORTCUT_PATH" 2>/dev/null || true
+        if [ -t 0 ] && [ -t 1 ]; then
+            echo -e "${CYAN}>>> 正在同步快捷命令 vpsbox...${NC}"
+        fi
+        curl -fsSL --connect-timeout 3 --max-time 8 "$SCRIPT_URL" -o "$SHORTCUT_PATH" 2>/dev/null && chmod 755 "$SHORTCUT_PATH" 2>/dev/null || true
     fi
 }
 _sync_shortcut_from_current
 
-# 启动时检测远程版本：只提示，不自动更新
+# 启动时检测远程版本：异步在后台获取远程版本，防阻塞启动，只提示不自动更新
 REMOTE_VERSION=""
 UPDATE_AVAILABLE=0
 _check_startup_update() {
-    local remote_ver local_ver newer i r l
-    remote_ver=$(curl -sL --connect-timeout 2 --max-time 3 "$SCRIPT_URL" 2>/dev/null | grep -oP '^VPSBOX_VERSION="\K[^"]+' | head -1)
-    [ -z "$remote_ver" ] && return 0
-    REMOTE_VERSION="$remote_ver"
-    remote_ver="${remote_ver#v}"
-    local_ver="${VPSBOX_VERSION#v}"
-    [ "$remote_ver" = "$local_ver" ] && return 0
-    IFS='.' read -ra rmt_parts <<< "$remote_ver"
-    IFS='.' read -ra loc_parts <<< "$local_ver"
-    newer=0
-    for i in 0 1 2; do
-        r=${rmt_parts[$i]:-0}; l=${loc_parts[$i]:-0}
-        if [ "$r" -gt "$l" ] 2>/dev/null; then newer=1; break; fi
-        if [ "$r" -lt "$l" ] 2>/dev/null; then break; fi
-    done
-    [ "$newer" -eq 1 ] && UPDATE_AVAILABLE=1
+    if [ -f /tmp/vpsbox_remote_version ]; then
+        local remote_ver local_ver newer i r l
+        remote_ver=$(cat /tmp/vpsbox_remote_version 2>/dev/null)
+        [ -z "$remote_ver" ] && return 0
+        REMOTE_VERSION="$remote_ver"
+        remote_ver="${remote_ver#v}"
+        local_ver="${VPSBOX_VERSION#v}"
+        [ "$remote_ver" = "$local_ver" ] && return 0
+        IFS='.' read -ra rmt_parts <<< "$remote_ver"
+        IFS='.' read -ra loc_parts <<< "$local_ver"
+        newer=0
+        for i in 0 1 2; do
+            r=${rmt_parts[$i]:-0}; l=${loc_parts[$i]:-0}
+            if [ "$r" -gt "$l" ] 2>/dev/null; then newer=1; break; fi
+            if [ "$r" -lt "$l" ] 2>/dev/null; then break; fi
+        done
+        [ "$newer" -eq 1 ] && UPDATE_AVAILABLE=1
+    fi
 }
-_check_startup_update
+_start_async_update_check() {
+    rm -f /tmp/vpsbox_remote_version
+    (
+        local remote_ver
+        remote_ver=$(curl -sL --connect-timeout 2 --max-time 3 "$SCRIPT_URL" 2>/dev/null | grep -oP '^VPSBOX_VERSION="\K[^"]+' | head -1)
+        if [ -n "$remote_ver" ]; then
+            echo "$remote_ver" > /tmp/vpsbox_remote_version
+        fi
+    ) &
+}
+_start_async_update_check
+
 if [ -f /etc/os-release ]; then
 # shellcheck disable=SC1091
 . /etc/os-release
-if [[ "$ID" == "debian" && "$VERSION_ID" == "13" ]]; then
-  :
-else
-  echo -e "\n${RED}[错误] 本脚本仅支持 Debian 13 (Trixie) 系统！当前系统: ${NAME:-$ID} ${VERSION_ID}${NC}\n"
+SUPPORTED=0
+if [[ "$ID" == "debian" ]]; then
+  if [[ "$VERSION_ID" == "12" || "$VERSION_ID" == "13" ]]; then
+    SUPPORTED=1
+  fi
+elif [[ "$ID" == "ubuntu" ]]; then
+  if [[ "$VERSION_ID" == "20.04" || "$VERSION_ID" == "22.04" || "$VERSION_ID" == "24.04" ]]; then
+    SUPPORTED=1
+  fi
+fi
+if [ "$SUPPORTED" -eq 0 ]; then
+  echo -e "\n${RED}[错误] 本脚本仅支持 Debian 12/13 或 Ubuntu 20.04/22.04/24.04 系统！当前系统: ${NAME:-$ID} ${VERSION_ID}${NC}\n"
   exit 1
 fi
 else
-echo -e "\n${RED}[错误] 无法识别的操作系统！本脚本仅支持 Debian 13 (Trixie) 系统。${NC}\n"
+echo -e "\n${RED}[错误] 无法识别的操作系统！本脚本仅支持 Debian 12/13 或 Ubuntu 20.04/22.04/24.04 系统。${NC}\n"
 exit 1
 fi
 if ! grep -qE "^[[:space:]]*[0-9:.]+[[:space:]].*(^|[[:space:]])$(hostname)([[:space:]]|$)" /etc/hosts; then
@@ -160,55 +191,68 @@ _domain_resolution_summary() {
   echo "$ips"
 }
 
+_display_width() {
+  local text="$1" plain chars bytes cjk
+  # 去除 ANSI 转义字符以计算真实显示宽度，支持 CJK 字符双倍列宽
+  plain=$(printf '%b' "$text" | sed -E 's/\x1B\[[0-9;]*[mK]//g' 2>/dev/null || echo "$text")
+  chars=${#plain}
+  bytes=$(printf "%s" "$plain" | wc -c | tr -d ' ')
+  cjk=$(( (bytes - chars) / 2 ))
+  echo $(( chars + cjk ))
+}
+
 get_term_width() {
-local cols
-cols=$(tput cols 2>/dev/null || echo 80)
-if [ "$cols" -gt 100 ]; then echo 100
-elif [ "$cols" -lt 40 ]; then echo 40
-else echo "$cols"
-fi
+  local cols
+  cols=$(tput cols 2>/dev/null || echo 80)
+  if [ "$cols" -gt 100 ]; then echo 100
+  elif [ "$cols" -lt 40 ]; then echo 40
+  else echo "$cols"
+  fi
 }
 
 print_divider() {
-local w
-w=$(get_term_width)
-echo -e "${CYAN}$(printf '%*s' "$w" '' | tr ' ' '=')${NC}"
+  local w line
+  w=$(get_term_width)
+  # 使用纯 Bash 截取 Unicode 细水平线 '─'，替代 printf + tr 的外挂进程，响应更流畅
+  local long_line="────────────────────────────────────────────────────────────────────────────────────────────────────"
+  line="${long_line:0:$w}"
+  echo -e "${CYAN}${line}${NC}"
 }
 
 print_center() {
-local text="$1"
-local color="$2"
-local term_width plain_text
-term_width=$(get_term_width)
-plain_text=$(printf '%b' "$text" | sed -E 's/\x1B\[[0-9;]*[mK]//g')
-local text_len=${#plain_text}
-local padding=$(( (term_width - text_len) / 2 ))
-[ "$padding" -lt 0 ] && padding=0
-printf "%${padding}s" ""
-echo -e "${color}${text}${NC}"
+  local text="$1"
+  local color="$2"
+  local term_width text_len padding
+  term_width=$(get_term_width)
+  text_len=$(_display_width "$text")
+  padding=$(( (term_width - text_len) / 2 ))
+  [ "$padding" -lt 0 ] && padding=0
+  printf "%${padding}s" ""
+  echo -e "${color}${text}${NC}"
 }
 
 pause_for_enter() {
-echo ""
-print_divider
-echo -ne "${YELLOW}> 操作已完成，请按 [回车键] 返回主菜单...${NC}"
-read -r
+  echo ""
+  print_divider
+  echo -ne "${BOLD_YELLOW}> 操作已完成，请按 [回车键] 返回主菜单...${NC}"
+  read -r
 }
 
 confirm_action() {
-local action_name=$1
-local default=${2:-y}
-local hint
-if [[ "$default" =~ ^[yY]$ ]]; then hint="Y/n"; else hint="y/N"; fi
-echo ""
-read -r -p "> 是否确认执行 [${action_name}]？(${hint}): " confirm
-confirm="${confirm// /}"
-[ -z "$confirm" ] && confirm="$default"
-if [[ ! "$confirm" =~ ^[yY]$ ]]; then
-echo -e "\n${YELLOW}已取消 [${action_name}] 操作。${NC}"
-return 1
-fi
-return 0
+  local action_name=$1
+  local default=${2:-y}
+  local hint confirm
+  if [[ "$default" =~ ^[yY]$ ]]; then hint="Y/n"; else hint="y/N"; fi
+  echo ""
+  echo -ne "${BOLD_CYAN}> 是否确认执行 [${action_name}]？(${NC}${hint}${BOLD_CYAN}): ${NC}"
+  read -r confirm
+  confirm="${confirm// /}"
+  [ -z "$confirm" ] && confirm="$default"
+  if [[ ! "$confirm" =~ ^[yY]$ ]]; then
+    echo -e "\n${YELLOW}已取消 [${action_name}] 操作。${NC}"
+    return 1
+  fi
+  return 0
 }
 
 fix_dpkg() {
@@ -583,37 +627,62 @@ persist_node_runtime() {
 
 remove_node_runtime() {
   local core_name="$1" port="$2"
-  local meta_file fragment_file node_dir backup_fragment
+  local meta_file node_dir backup_fragments=() matches=()
   meta_file=$(_node_meta_file_for_core "$core_name") || return 1
   node_dir=$(_node_dir_for_core "$core_name") || return 1
   _ensure_node_meta_file "$meta_file"
-  fragment_file=$(jq -r --argjson port "$port" '.[] | select(.port == $port) | .file' "$meta_file" 2>/dev/null | head -n 1)
-  if [ -z "$fragment_file" ] || [ ! -f "$fragment_file" ]; then
-    shopt -s nullglob
-    local matches=("$node_dir/${port}-"*.json "$node_dir/${port}.json")
-    shopt -u nullglob
-    if [ ${#matches[@]} -eq 0 ]; then
-      echo -e "${RED}[错误] 未找到端口 $port 对应的节点片段文件。${NC}"
-      return 1
-    fi
-    fragment_file="${matches[0]}"
+  
+  # 收集所有匹配的配置文件（支持级联清理多端口复用节点组）
+  shopt -s nullglob
+  matches=("$node_dir/${port}-"*.json "$node_dir/${port}.json")
+  local meta_file_path; meta_file_path=$(jq -r --argjson port "$port" '.[] | select(.port == $port) | .file' "$meta_file" 2>/dev/null | head -n 1)
+  if [ -n "$meta_file_path" ] && [ -f "$meta_file_path" ]; then
+    matches+=("$meta_file_path")
   fi
-  backup_fragment="${fragment_file}.bak.$$"
-  mv "$fragment_file" "$backup_fragment" || return 1
+  shopt -u nullglob
+  
+  # 数组去重
+  local unique_matches=()
+  read -r -a unique_matches < <(printf "%s\n" "${matches[@]}" 2>/dev/null | sort -u | tr '\n' ' ')
+  
+  if [ ${#unique_matches[@]} -eq 0 ]; then
+    echo -e "${RED}[错误] 未找到端口 $port 对应的节点配置。${NC}"
+    return 1
+  fi
+  
+  # 备份所有匹配的碎片文件以防回滚
+  local f
+  for f in "${unique_matches[@]}"; do
+    if [ -f "$f" ]; then
+      mv "$f" "${f}.bak.$$" || return 1
+      backup_fragments+=("${f}.bak.$$")
+    fi
+  done
+  
   if ! rebuild_core_config "$core_name"; then
-    mv "$backup_fragment" "$fragment_file" >/dev/null 2>&1 || true
+    for f in "${backup_fragments[@]}"; do
+      mv "$f" "${f%.bak.*}" >/dev/null 2>&1 || true
+    done
     rebuild_core_config "$core_name" >/dev/null 2>&1 || true
     echo -e "${RED}[错误] 重新生成 ${core_name} 主配置失败，已自动回滚节点片段。${NC}"
     return 1
   fi
+  
   if ! _reload_core_without_disconnect "$core_name"; then
-    mv "$backup_fragment" "$fragment_file" >/dev/null 2>&1 || true
+    for f in "${backup_fragments[@]}"; do
+      mv "$f" "${f%.bak.*}" >/dev/null 2>&1 || true
+    done
     rebuild_core_config "$core_name" >/dev/null 2>&1 || true
     _reload_core_without_disconnect "$core_name" >/dev/null 2>&1 || true
-    echo -e "${RED}[错误] ${core_name} 延迟重启安排失败，已自动回滚节点片段并恢复旧配置。${NC}"
+    echo -e "${RED}[错误] ${core_name} 延迟重启安排失败，已自动回滚配置。${NC}"
     return 1
   fi
-  rm -f "$backup_fragment"
+  
+  # 彻底删除备份
+  for f in "${backup_fragments[@]}"; do
+    rm -f "$f"
+  done
+  
   _node_meta_remove_port "$core_name" "$port" || true
   return 0
 }
@@ -1082,10 +1151,19 @@ fi
 
 _bbr_check_sys() {
   BBR_ARCH=$(uname -m)
-  BBR_OS_ID="debian"
-  BBR_OS_TYPE="Debian"
-  BBR_OS_VER="13"
-  BBR_OS_LIKE="debian"
+  if [ -f /etc/os-release ]; then
+    # shellcheck disable=SC1091
+    . /etc/os-release
+    BBR_OS_ID="$ID"
+    BBR_OS_TYPE="${NAME:-$ID}"
+    BBR_OS_VER="$VERSION_ID"
+    BBR_OS_LIKE="${ID_LIKE:-$ID}"
+  else
+    BBR_OS_ID="debian"
+    BBR_OS_TYPE="Debian"
+    BBR_OS_VER="13"
+    BBR_OS_LIKE="debian"
+  fi
 }
 
 _bbr_check_cn() {
@@ -2010,6 +2088,15 @@ _bbr_install_bbrplus_new() {
 }
 
 _bbr_install_debian_cloud() {
+  if [ -f /etc/os-release ]; then
+    # shellcheck disable=SC1091
+    . /etc/os-release
+  fi
+  if [[ "$ID" != "debian" ]]; then
+    echo -e "\n${RED}[错误] 官方 Debian Cloud 内核仅支持 Debian 系统！${NC}"
+    pause_for_enter
+    return 1
+  fi
   local img_url_base img_pattern
   if [[ "$BBR_ARCH" == "x86_64" ]]; then
     img_url_base="https://deb.debian.org/debian/pool/main/l/linux-signed-amd64/"
@@ -2032,10 +2119,22 @@ _bbr_install_debian_cloud() {
 _bbr_install_official_stable() {
   echo -e "\n${CYAN}>>> 安装官方稳定内核...${NC}"
   apt-get update >/dev/null 2>&1
-  if [[ "$BBR_ARCH" == "x86_64" ]]; then
-    apt-get install linux-image-amd64 linux-headers-amd64 -y
-  elif [[ "$BBR_ARCH" == "aarch64" ]]; then
-    apt-get install linux-image-arm64 linux-headers-arm64 -y
+  if [ -f /etc/os-release ]; then
+    # shellcheck disable=SC1091
+    . /etc/os-release
+  fi
+  if [[ "$ID" == "debian" ]]; then
+    if [[ "$BBR_ARCH" == "x86_64" ]]; then
+      apt-get install linux-image-amd64 linux-headers-amd64 -y
+    elif [[ "$BBR_ARCH" == "aarch64" ]]; then
+      apt-get install linux-image-arm64 linux-headers-arm64 -y
+    fi
+  elif [[ "$ID" == "ubuntu" ]]; then
+    if [[ "$BBR_ARCH" == "x86_64" ]]; then
+      apt-get install linux-image-generic linux-headers-generic -y
+    elif [[ "$BBR_ARCH" == "aarch64" ]]; then
+      apt-get install linux-image-generic linux-headers-generic -y
+    fi
   fi
   _bbr_grub
   echo -e "\n${GREEN}[完成] 官方稳定内核安装完毕。${NC}"; pause_for_enter
@@ -2044,13 +2143,25 @@ _bbr_install_official_stable() {
 _bbr_install_official_latest() {
   echo -e "\n${CYAN}>>> 安装官方最新内核...${NC}"
   apt-get update >/dev/null 2>&1
-  local codename; codename=$(awk -F= '/^VERSION_CODENAME/{print $2}' /etc/os-release | tr -d '"')
-  [[ -z "$codename" ]] && codename=$(awk -F= '/^VERSION=/{print $2}' /etc/os-release | grep -oP '(?<=\\().*(?=\\))')
-  [[ -n "$codename" ]] && echo "deb http://deb.debian.org/debian ${codename}-backports main" > "/etc/apt/sources.list.d/${codename}-backports.list" && apt-get update >/dev/null 2>&1
-  if [[ "$BBR_ARCH" == "x86_64" ]]; then
-    apt-get install linux-image-amd64 linux-headers-amd64 -y
-  elif [[ "$BBR_ARCH" == "aarch64" ]]; then
-    apt-get install linux-image-arm64 linux-headers-arm64 -y
+  if [ -f /etc/os-release ]; then
+    # shellcheck disable=SC1091
+    . /etc/os-release
+  fi
+  if [[ "$ID" == "debian" ]]; then
+    local codename; codename=$(awk -F= '/^VERSION_CODENAME/{print $2}' /etc/os-release | tr -d '"')
+    [[ -z "$codename" ]] && codename=$(awk -F= '/^VERSION=/{print $2}' /etc/os-release | grep -oP '(?<=\().*(?=\))')
+    [[ -n "$codename" ]] && echo "deb http://deb.debian.org/debian ${codename}-backports main" > "/etc/apt/sources.list.d/${codename}-backports.list" && apt-get update >/dev/null 2>&1
+    if [[ "$BBR_ARCH" == "x86_64" ]]; then
+      apt-get install linux-image-amd64 linux-headers-amd64 -y
+    elif [[ "$BBR_ARCH" == "aarch64" ]]; then
+      apt-get install linux-image-arm64 linux-headers-arm64 -y
+    fi
+  elif [[ "$ID" == "ubuntu" ]]; then
+    if [[ "$BBR_ARCH" == "x86_64" ]]; then
+      apt-get install linux-image-generic linux-headers-generic -y
+    elif [[ "$BBR_ARCH" == "aarch64" ]]; then
+      apt-get install linux-image-generic-hwe-* linux-headers-generic-hwe-* -y 2>/dev/null || apt-get install linux-image-generic linux-headers-generic -y
+    fi
   fi
   _bbr_grub
   echo -e "\n${GREEN}[完成] 官方最新内核安装完毕。${NC}"; pause_for_enter
@@ -2233,7 +2344,7 @@ echo -e "  ${CYAN}地理位置 :${NC} $country $city"
 echo -e "  ${CYAN}系统时间 :${NC} ${CURRENT_TZ}  $cur_time"
 print_divider
 echo -e "  ${CYAN}运行时长 :${NC} $runtime"
-echo -e "  ${CYAN}BBR     :${NC} $(get_bbr_status)"
+echo -e "  ${CYAN}BBR      :${NC} $(get_bbr_status)"
 echo ""
 echo -e "  ${YELLOW}已部署核心状态:${NC}"
 local svc
@@ -2651,7 +2762,7 @@ CORE_NAME="Sing-box"
 if ! command -v sing-box &> /dev/null; then echo -e "${YELLOW}   首次部署需下载 Sing-box 核心，请耐心等待...${NC}"; _run_remote_bash https://sing-box.app/install.sh > /dev/null 2>&1; hash -r; command -v sing-box &>/dev/null || { echo -e "\n${RED}[错误] Sing-box 核心下载失败，请检查网络连接。${NC}"; pause_for_enter; return; }; fi
 SB_BIN=$(command -v sing-box || echo "/usr/local/bin/sing-box"); KEYS=$("$SB_BIN" generate reality-keypair)
 PRI=$(echo "$KEYS" | awk -F'[: ]+' '/Private/{print $NF}'); PUB=$(echo "$KEYS" | awk -F'[: ]+' '/Public/{print $NF}')
-NEW_INBOUND='{"type":"vless","listen":"0.0.0.0","listen_port":'$PORT',"users":[{"uuid":"'$UUID'","flow":"xtls-rprx-vision"}],"tls":{"enabled":true,"server_name":"'$SNI_DOMAIN'","reality":{"enabled":true,"handshake":{"server":"'$SNI_DOMAIN'","server_port":443},"private_key":"'$PRI'","short_id":["'$SHORT_ID'"]}}}'
+NEW_INBOUND='{"type":"vless","listen":"::","listen_port":'$PORT',"users":[{"uuid":"'$UUID'","flow":"xtls-rprx-vision"}],"tls":{"enabled":true,"server_name":"'$SNI_DOMAIN'","reality":{"enabled":true,"handshake":{"server":"'$SNI_DOMAIN'","server_port":443},"private_key":"'$PRI'","short_id":["'$SHORT_ID'"]}}}'
 
 LINK="vless://${UUID}@${LINK_IP}:${PORT}?encryption=none&security=reality&sni=${SNI_DOMAIN}&fp=chrome&pbk=${PUB}&sid=${SHORT_ID}&flow=xtls-rprx-vision#R"
 
@@ -2719,7 +2830,7 @@ CORE_NAME="Sing-box"
 if ! command -v sing-box &> /dev/null; then echo -e "${YELLOW}   首次部署需下载 Sing-box 核心...${NC}"; _run_remote_bash https://sing-box.app/install.sh > /dev/null 2>&1; hash -r; command -v sing-box &>/dev/null || { echo -e "\n${RED}[错误] Sing-box 核心下载失败。${NC}"; pause_for_enter; return; }; fi
 
 PASSWORD=$(openssl rand -base64 12 | tr -d '+/=' | head -c 16)
-NEW_INBOUND='{"type":"anytls","listen":"0.0.0.0","listen_port":'$PORT',"users":[{"password":"'$PASSWORD'"}],"tls":{"enabled":true,"server_name":"'$DOMAIN'","certificate_path":"'$CERT_DIR'/fullchain.pem","key_path":"'$CERT_DIR'/privkey.pem"}}'
+NEW_INBOUND='{"type":"anytls","listen":"::","listen_port":'$PORT',"users":[{"password":"'$PASSWORD'"}],"tls":{"enabled":true,"server_name":"'$DOMAIN'","certificate_path":"'$CERT_DIR'/fullchain.pem","key_path":"'$CERT_DIR'/privkey.pem"}}'
 LINK="anytls://${PASSWORD}@${DOMAIN}:${PORT}?peer=${DOMAIN}#AnyTLS-${PORT}"
 
 if append_inbound "$NEW_INBOUND" "$PORT" "$CORE_NAME" "AnyTLS" "anytls" "$LINK"; then
@@ -2872,7 +2983,7 @@ acquire_cert "$DOMAIN" "$cert_mode" "$CF_Token" "" || { pause_for_enter; return;
 UUID=$(cat /proc/sys/kernel/random/uuid); WSPATH="/$(openssl rand -hex 4)"
 CORE_NAME="Sing-box"
 if ! command -v sing-box &> /dev/null; then echo -e "${YELLOW}   首次部署需下载 Sing-box 核心，请耐心等待...${NC}"; _run_remote_bash https://sing-box.app/install.sh > /dev/null 2>&1; hash -r; command -v sing-box &>/dev/null || { echo -e "\n${RED}[错误] Sing-box 核心下载失败，请检查网络连接。${NC}"; pause_for_enter; return; }; fi
-NEW_INBOUND='{"type":"vless","listen":"0.0.0.0","listen_port":'$WS_PORT',"users":[{"uuid":"'$UUID'"}],"tls":{"enabled":true,"server_name":"'$DOMAIN'","certificate_path":"'$CERT_DIR'/fullchain.pem","key_path":"'$CERT_DIR'/privkey.pem"},"transport":{"type":"ws","path":"'$WSPATH'"}}'
+NEW_INBOUND='{"type":"vless","listen":"::","listen_port":'$WS_PORT',"users":[{"uuid":"'$UUID'"}],"tls":{"enabled":true,"server_name":"'$DOMAIN'","certificate_path":"'$CERT_DIR'/fullchain.pem","key_path":"'$CERT_DIR'/privkey.pem"},"transport":{"type":"ws","path":"'$WSPATH'"}}'
 
 LINK="vless://${UUID}@${DOMAIN}:${WS_PORT}?encryption=none&security=tls&sni=${DOMAIN}&alpn=h2%2Chttp%2F1.1&type=ws&host=${DOMAIN}&path=${WSPATH}#WS"
 
@@ -2934,7 +3045,7 @@ LINK_IP="$SERVER_IP"
 if [ "$SERVER_IPV4" == "未分配" ] && [ "$SERVER_IPV6" != "未分配" ]; then LINK_IP="[${SERVER_IPV6}]"; fi
 CORE_NAME="Sing-box"
 if ! command -v sing-box &> /dev/null; then echo -e "${YELLOW}   首次部署需下载 Sing-box 核心，请耐心等待...${NC}"; _run_remote_bash https://sing-box.app/install.sh > /dev/null 2>&1; hash -r; command -v sing-box &>/dev/null || { echo -e "\n${RED}[错误] Sing-box 核心下载失败，请检查网络连接。${NC}"; pause_for_enter; return; }; fi
-NEW_INBOUND='{"type":"shadowsocks","listen":"0.0.0.0","listen_port":'$SS_PORT',"network":"tcp,udp","method":"'$SS_METHOD'","password":"'$SS_PASS'"}'
+NEW_INBOUND='{"type":"shadowsocks","listen":"::","listen_port":'$SS_PORT',"network":"tcp,udp","method":"'$SS_METHOD'","password":"'$SS_PASS'"}'
 
 SS_USERINFO=$(printf '%s:%s' "$SS_METHOD" "$SS_PASS" | base64 -w0 2>/dev/null || printf '%s:%s' "$SS_METHOD" "$SS_PASS" | base64 | tr -d '\n')
 LINK="ss://${SS_USERINFO}@${LINK_IP}:${SS_PORT}#SS-${SS_PORT}"
@@ -3053,7 +3164,7 @@ HY2_PASS=$(openssl rand -hex 8)
 CORE_NAME="Sing-box"
 if ! command -v sing-box &> /dev/null; then echo -e "${YELLOW}   首次部署需下载 Sing-box 核心，请耐心等待...${NC}"; _run_remote_bash https://sing-box.app/install.sh > /dev/null 2>&1; hash -r; command -v sing-box &>/dev/null || { echo -e "
 ${RED}[错误] Sing-box 核心下载失败，请检查网络连接。${NC}"; pause_for_enter; return; }; fi
-NEW_INBOUND='{"type":"hysteria2","listen":"0.0.0.0","listen_port":'$HY2_PORT',"users":[{"password":"'$HY2_PASS'"}],"tls":{"enabled":true,"server_name":"'$DOMAIN'","alpn":["h3"],"certificate_path":"'$CERT_DIR'/fullchain.pem","key_path":"'$CERT_DIR'/privkey.pem"}}'
+NEW_INBOUND='{"type":"hysteria2","listen":"::","listen_port":'$HY2_PORT',"users":[{"password":"'$HY2_PASS'"}],"tls":{"enabled":true,"server_name":"'$DOMAIN'","alpn":["h3"],"certificate_path":"'$CERT_DIR'/fullchain.pem","key_path":"'$CERT_DIR'/privkey.pem"}}'
 
 LINK="hysteria2://${HY2_PASS}@${DOMAIN}:${HY2_PORT}/?sni=${DOMAIN}&alpn=h3&insecure=0#H2"
 
@@ -3448,7 +3559,11 @@ while [ $i -le 17 ]; do
   local cmd1; cmd1=$(_tool_cmd $id1)
   local desc1; desc1=$(_tool_desc $id1)
   local s1; command -v "$cmd1" &>/dev/null && s1="${GREEN}✅${NC}" || s1="${RED}❌${NC}"
-  local left; left=$(printf "  ${CYAN}%2d.${NC} %-26s %b" "$id1" "$desc1" "$s1")
+  
+  local w1; w1=$(_display_width "$desc1")
+  local pad1=$(( 26 - w1 ))
+  [ "$pad1" -lt 1 ] && pad1=1
+  local left; left=$(printf "  ${CYAN}%2d.${NC} %s%*s %b" "$id1" "$desc1" "$pad1" "" "$s1")
 
   if [ $id2 -le 17 ]; then
     local cmd2; cmd2=$(_tool_cmd $id2)
@@ -3904,6 +4019,7 @@ menu_header() {
 }
 
 menu_logo() {
+  _check_startup_update
   clear_screen
   print_divider
   echo -e "${PURPLE}"
@@ -3921,15 +4037,6 @@ menu_logo() {
   fi
   print_divider
   echo ""
-}
-
-_display_width() {
-  # 近似计算终端显示宽度：ASCII=1，常见 CJK UTF-8 字符=2
-  local text="$1" chars bytes cjk
-  chars=${#text}
-  bytes=$(printf "%s" "$text" | wc -c | tr -d ' ')
-  cjk=$(( (bytes - chars) / 2 ))
-  echo $(( chars + cjk ))
 }
 
 menu_pair() {

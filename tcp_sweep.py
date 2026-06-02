@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
+import argparse
 import json
 import math
 from pathlib import Path
 
-OUT_JSON = Path('/root/github/VPSBox/tcp_sweep_analysis.json')
-OUT_MD = Path('/root/github/VPSBox/tcp_sweep_analysis.md')
+OUT_JSON = Path(__file__).resolve().parent / 'tcp_sweep.json'
+OUT_MD = Path(__file__).resolve().parent / 'tcp_sweep.md'
 
 LOCAL_BWS = [5, 20, 100, 300, 1000, 5000, 20000, 100000]
 VPS_BWS = [10, 100, 1000, 10000]
@@ -305,6 +306,13 @@ def analyze(case, p):
     return issues
 
 def main():
+    parser = argparse.ArgumentParser(description="TCP parameter sweep analysis script")
+    parser.add_argument("--output-json", type=Path, default=OUT_JSON,
+                        help="Path to output the analysis JSON report")
+    parser.add_argument("--output-md", type=Path, default=OUT_MD,
+                        help="Path to output the analysis Markdown report")
+    args = parser.parse_args()
+
     cases = []
     for lb in LOCAL_BWS:
         for vb in VPS_BWS:
@@ -329,11 +337,11 @@ def main():
             'min_free_max': max(cases, key=lambda c: c['profile']['min_free']),
         }
     }
-    OUT_JSON.write_text(json.dumps(report, ensure_ascii=False, indent=2) + '\n')
-    lines = ['# TCP sweep analysis', '']
+    args.output_json.write_text(json.dumps(report, ensure_ascii=False, indent=2) + '\n')
+    lines = ['# TCP sweep', '']
     for k, v in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0])):
         lines.append(f'- {k}: {v}')
-    OUT_MD.write_text('\n'.join(lines) + '\n')
+    args.output_md.write_text('\n'.join(lines) + '\n')
     print(json.dumps(report, ensure_ascii=False))
 
 if __name__ == '__main__':

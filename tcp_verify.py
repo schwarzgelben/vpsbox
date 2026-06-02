@@ -1,16 +1,18 @@
 #!/usr/bin/env python3
+import argparse
 import json
 import math
 import os
 import re
 import subprocess
+import sys
 import urllib.error
 from pathlib import Path
 from urllib.request import Request, urlopen
 
-REPO_SCRIPT = Path('/root/github/VPSBox/vpsbox.sh')
-REPORT_JSON = Path('/root/github/VPSBox/tcp_compare_report.json')
-REPORT_MD = Path('/root/github/VPSBox/tcp_compare_report.md')
+REPO_SCRIPT = Path(__file__).resolve().parent / 'vpsbox.sh'
+REPORT_JSON = Path(__file__).resolve().parent / 'tcp_verify.json'
+REPORT_MD = Path(__file__).resolve().parent / 'tcp_verify.md'
 
 SCENARIOS = [
     {"name":"low-latency-small-mem","local_bw":100,"vps_bw":1000,"latency":30,"mem":256,"ramp":0.5,"cc":"bbr","ecn":0},
@@ -397,30 +399,51 @@ def normalize_value(v):
     return ' '.join(str(v).split())
 
 
-def sysctl_apply_and_readback(profile):
+def sysctl_apply_and_readback(profile, dry_run=False):
     sysctl_items = [(k, v) for k, v in profile.items() if k != 'mode']
     applied = 0
     matched = 0
     results = []
     for key, value in sysctl_items:
-        write = subprocess.run(['sysctl', '-w', f'{key}={value}'], capture_output=True, text=True)
-        ok = write.returncode == 0
-        readback = None
-        match = False
-        if ok:
+        if dry_run:
+            ok = True
+            write_stderr = ""
+            write_stdout = ""
+            readback = normalize_value(value)
+            match = True
             applied += 1
-            read = subprocess.run(['sysctl', '-n', key], capture_output=True, text=True)
-            if read.returncode == 0:
-                readback = normalize_value(read.stdout.strip())
-                match = readback == normalize_value(value)
-                if match:
-                    matched += 1
+            matched += 1
+        else:
+            try:
+                write = subprocess.run(['sysctl', '-w', f'{key}={value}'], capture_output=True, text=True)
+                ok = write.returncode == 0
+                write_stderr = write.stderr.strip()
+                write_stdout = write.stdout.strip()
+            except FileNotFoundError:
+                ok = False
+                write_stderr = "sysctl command not found"
+                write_stdout = ""
+            
+            readback = None
+            match = False
+            if ok:
+                applied += 1
+                try:
+                    read = subprocess.run(['sysctl', '-n', key], capture_output=True, text=True)
+                    if read.returncode == 0:
+                        readback = normalize_value(read.stdout.strip())
+                        match = readback == normalize_value(value)
+                        if match:
+                            matched += 1
+                except FileNotFoundError:
+                    pass
+        
         results.append({
             'key': key,
             'expected': normalize_value(value),
             'write_ok': ok,
-            'write_stderr': write.stderr.strip(),
-            'write_stdout': write.stdout.strip(),
+            'write_stderr': write_stderr,
+            'write_stdout': write_stdout,
             'readback': readback,
             'match': match,
         })
@@ -436,7 +459,14 @@ def sysctl_apply_and_readback(profile):
     }
 
 
-def fetch_omnitt_evidence():
+def fetch_omnitt_evidence(skip_network=False):
+    if skip_network:
+        return {
+            'status_note': 'network check skipped',
+            'title_found': False,
+            'desc_found': False,
+            'html_excerpt': None,
+        }
     req = Request('https://www.omnitt.com/tcp-optimizer', headers={'User-Agent': 'Mozilla/5.0'})
     status_note = 'public endpoint reachable'
     try:
@@ -448,18 +478,29 @@ def fetch_omnitt_evidence():
     return {
         'status_note': status_note,
         'title_found': 'TCP 迷之调参 - 智能网络优化工具' in html,
-        'desc_found': '只需输入本地带宽、服务器带宽和网络延迟' in html,
+        'desc_found': '只需输入本地带宽、服务器带宽 and 网络延迟' in html,
         'html_excerpt': (m.group(1) if (m := re.search(r'<title>(.*?)</title>', html)) else None),
     }
 
 
 def main():
-    omnitt = fetch_omnitt_evidence()
+    parser = argparse.ArgumentParser(description="TCP tuning verification script")
+    parser.add_argument("--output-json", type=Path, default=REPORT_JSON,
+                        help="Path to output the comparison JSON report")
+    parser.add_argument("--output-md", type=Path, default=REPORT_MD,
+                        help="Path to output the comparison Markdown report")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="Dry run: mock sysctl applying and readback")
+    parser.add_argument("--no-network", action="store_true",
+                        help="Skip online network status check for Omnitt")
+    args = parser.parse_args()
+
+    omnitt = fetch_omnitt_evidence(skip_network=args.no_network)
     scenario_reports = []
     aggregate_total = aggregate_applied = aggregate_matched = 0
     for sc in SCENARIOS:
         profile = current_vpsbox_profile(sc['local_bw'], sc['vps_bw'], sc['latency'], sc['mem'], sc['ramp'], sc['cc'], sc['ecn'])
-        apply_report = sysctl_apply_and_readback(profile)
+        apply_report = sysctl_apply_and_readback(profile, dry_run=args.dry_run)
         aggregate_total += apply_report['total']
         aggregate_applied += apply_report['applied']
         aggregate_matched += apply_report['matched']
@@ -492,10 +533,10 @@ def main():
         'overall_verification': overall,
         'scenarios': scenario_reports,
     }
-    REPORT_JSON.write_text(json.dumps(report, ensure_ascii=False, indent=2) + '\n')
+    args.output_json.write_text(json.dumps(report, ensure_ascii=False, indent=2) + '\n')
 
     lines = []
-    lines.append('# TCP tuning verification report')
+    lines.append('# TCP tuning verification')
     lines.append('')
     lines.append(f'- Omnitt source checked: {OMNITT_META}')
     lines.append(f"- Omnitt evidence: title_found={omnitt['title_found']}, desc_found={omnitt['desc_found']}, title={omnitt['html_excerpt']}")
@@ -517,8 +558,8 @@ def main():
         if item['mismatches']:
             for r in item['mismatches'][:5]:
                 lines.append(f"  - MISMATCH {r['key']}: expected={r['expected']} readback={r['readback']}")
-    REPORT_MD.write_text('\n'.join(lines) + '\n')
-    print(json.dumps({'report_json': str(REPORT_JSON), 'report_md': str(REPORT_MD), 'overall': overall}, ensure_ascii=False))
+    args.output_md.write_text('\n'.join(lines) + '\n')
+    print(json.dumps({'report_json': str(args.output_json), 'report_md': str(args.output_md), 'overall': overall}, ensure_ascii=False))
 
 if __name__ == '__main__':
     main()
